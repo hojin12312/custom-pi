@@ -13,13 +13,15 @@ This repository bundles custom TypeScript extensions for Pi located in `extensio
 
 ---
 
-## ⚙️ Configuration Templates
+## ⚙️ Configuration Templates & Guides
 
 Sanitized configuration templates are provided in `config/`:
 
 * **`config/settings.json.example`**: Recommended global settings (reasoning level, compaction token headroom, packages).
-* **`config/models.json.example`**: Provider configuration template supporting DeepSeek, OpenAI, and local/custom OpenAI-compatible proxies.
+* **`config/models.json.example`**: Provider configuration template supporting **OpenCode Go**, DeepSeek Cloud, and custom OpenAI-compatible proxies.
 * **`config/web-search.json.example`**: 2-tier search routing setup (Exa → Brave fallback).
+
+📖 **[OpenCode Go Provider Integration Guide](docs/OPENCODE_GO_GUIDE.md)**: Detailed setup guidelines for connecting Pi to the OpenCode Go gateway proxy, including model schemas, tracking headers (`X-Client-Id`), and multi-host (Tailnet) routing.
 
 ---
 
