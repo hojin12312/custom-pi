@@ -6,7 +6,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 ## 🎯 Core Pillars of Custom Pi
 
-`custom-pi` is built around 3 core pillars to empower Pi with web capabilities, autonomous subagents, and high-performance LLM gateway connectivity:
+`custom-pi` is built around 3 core infrastructure pillars to empower Pi with web capabilities, autonomous subagents, and high-performance LLM gateway connectivity:
 
 ### 1. 🌐 Web Search & Content Fetching (`pi-web-access`)
 * **Package**: `npm:pi-web-access`
@@ -26,12 +26,17 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 ---
 
-## 🛠️ Included Custom Extensions (`extensions/`)
+## 📋 Essential Custom Extensions (`extensions/`)
 
-* **`apply_patch.ts`**: Multi-file Git-style chunk patch tool (`*** Begin Patch ...`). Supports add, update, move, and delete in a single tool call.
-* **`imageread.ts`**: Local VLM vision integration for text-only coding models. Supports low/high detail reading, tiling, and normalized crop zoom-ins.
-* **`todo.ts`**: Interactive 3-state task list (`pending`, `in_progress`, `completed`). Adds `/todos` command and real-time terminal progress indicators.
-* **`question.ts`**: Interactive multi-choice and write-in question modal UI.
+`custom-pi` includes essential developer productivity tools:
+
+* 📝 **`todo.ts` (Essential Task Tracker)**:
+  * **3-State Task Status**: Tracks task states (`pending`, `in_progress`, `completed`).
+  * **`/todos` Command**: Slash command to inspect active task lists during sessions.
+  * **Real-time Terminal UI**: Live progress indicators (`X/Y completed`) in the Pi terminal UI.
+* 🛠️ **`apply_patch.ts` (Multi-file Patching)**: Multi-file Git-style chunk patch tool (`*** Begin Patch ...`). Supports file creation, edits, movement, and deletions in a single tool call.
+* 👁️ **`imageread.ts` (Local VLM Vision)**: Vision integration for text-only coding models. Supports low/high detail reading, tiling, and normalized crop zoom-ins.
+* ❓ **`question.ts` (Interactive Prompts)**: Interactive multi-choice and write-in question modal UI.
 
 ---
 
