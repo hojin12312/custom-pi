@@ -6,7 +6,8 @@
   "hideThinkingBlock": false,
   "contextFiles": true,
   "compaction": {
-    "reserveTokens": 32768
+    "reserveTokens": 49152,
+    "keepRecentTokens": 20000
   },
   "packages": [
     "npm:pi-web-access",

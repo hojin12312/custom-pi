@@ -2,6 +2,8 @@
 
 Custom extensions, core packages, and configuration templates for [Pi Coding Agent](https://github.com/earendil-works/pi).
 
+> 🕒 **Last Updated**: 2026-08-06 23:14:30 (KST)
+
 ---
 
 ## 🎯 Core Pillars of Custom Pi
@@ -30,6 +32,9 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 `custom-pi` includes essential developer productivity tools:
 
+* 🔄 **`auto_continue_compact.ts` (Smart Auto-Continue on Compaction)**:
+  * **2-Step Decision Gate**: Automatically detects context compaction (`session_compact`) and prompts the model to evaluate if output was cut off mid-task (`STATUS: TRUNCATED`).
+  * **Seamless Task Resume**: Automatically sends a clean follow-up prompt to re-render broken tables/code blocks and resume interrupted tasks without manual intervention.
 * 👁️ **`imageread.ts` (Local VLM Vision Bridge)**:
   * **Why it's needed**: High-performance coding models like DeepSeek V4 Flash or DeepSeek R1 are text-only models (`input: ["text"]`). `imageread` bridges this gap by allowing text models to inspect screenshots, charts, and image files via a local VLM endpoint.
   * **Dynamic Tool Activation**: Automatically activates when a text-only model is selected and hides itself when a native vision model (e.g. GPT-4o) is active.
@@ -48,7 +53,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 Sanitized configuration templates in `config/`:
 
-* **`config/settings.json.example`**: Pre-configured with `defaultProvider: "deepseek"`, `defaultThinkingLevel: "max"`, token reserve, and default packages.
+* **`config/settings.json.example`**: Pre-configured with `defaultProvider: "deepseek"`, `defaultThinkingLevel: "max"`, compaction reserves (`reserveTokens: 49152`, `keepRecentTokens: 20000`), and default packages.
 * **`config/models.json.example`**: Complete provider schemas for direct Cloud APIs (DeepSeek Official, OpenAI) & OpenCode Go gateway.
 * **`config/web-search.json.example`**: 2-tier search routing (Exa → Brave) template.
 
@@ -77,3 +82,4 @@ No private API keys, IP addresses, or secrets are tracked in this repository. Up
 * **[Pi Coding Agent](https://github.com/earendil-works/pi)**: Core terminal coding agent created by Mario Zechner & Earendil Works.
 * **[pi-subagents](https://www.npmjs.com/package/pi-subagents) & [pi-web-access](https://www.npmjs.com/package/pi-web-access)**: Official subagent orchestration and web search extension packages for Pi.
 * **[OpenCode](https://github.com/anomalyco/opencode)**: Original tool concepts and algorithms adapted for Pi extensions (`apply_patch`, `imageread`).
+
