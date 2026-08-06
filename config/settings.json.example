@@ -1,0 +1,21 @@
+{
+  "lastChangelogVersion": "0.83.0",
+  "enableInstallTelemetry": false,
+  "defaultProvider": "deepseek-cloud",
+  "defaultModel": "deepseek-v4-flash",
+  "hideThinkingBlock": false,
+  "contextFiles": true,
+  "compaction": {
+    "reserveTokens": 32768
+  },
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-subagents"
+  ],
+  "defaultThinkingLevel": "max",
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "doubleEscapeAction": "tree",
+  "theme": "dark"
+}
