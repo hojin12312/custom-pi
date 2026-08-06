@@ -1,6 +1,8 @@
 # 🌐 OpenCode Go Provider Integration Guide for Pi
 
-This guide details how to integrate and optimize **OpenCode Go** (the unified LLM gateway proxy) with [Pi Coding Agent](https://github.com/earendil-works/pi).
+> ℹ️ **Note for General Users**: Most users connecting Pi directly to official Cloud APIs (DeepSeek Official, OpenAI, Anthropic, OpenRouter) **do not need a local proxy**. You can configure standard API endpoints (`https://api.deepseek.com/v1`, `https://api.openai.com/v1`) directly in `models.json`.
+>
+> This guide is intended for advanced setups using **OpenCode Go** (an internal unified proxy gateway).
 
 ---
 
@@ -12,12 +14,12 @@ OpenCode Go acts as an OpenAI-compatible gateway proxy (`openai-completions`) ro
 
 ## 🛠️ Configuration (`models.json`)
 
-Add the `opencode-go` provider to `~/.pi/agent/models.json`:
+Add the `opencode-go-proxy` provider to `~/.pi/agent/models.json`:
 
 ```json
 {
   "providers": {
-    "opencode-go": {
+    "opencode-go-proxy": {
       "baseUrl": "http://localhost:8104/v1",
       "api": "openai-completions",
       "apiKey": "local-go-proxy",
@@ -76,11 +78,11 @@ Add the `opencode-go` provider to `~/.pi/agent/models.json`:
 
 ---
 
-## 🔑 Important Integration Rules
+## 🔑 Integration Notes
 
 ### 1. Host Network vs Tailnet Addressing
 * **Local Machine (e.g. Host Server)**: Use `http://localhost:8104/v1`
-* **Remote Machine (e.g. Laptop / Secondary Node)**: Use Tailnet address `https://<host-tailnet-name>:8104/v1`
+* **Remote Machine (e.g. Secondary Node)**: Use Tailnet address `https://<host-tailnet-name>:8104/v1`
 
 ### 2. Mandatory Tracking Headers
 Always pass `headers` to attribute token statistics in Usage Monitors:
@@ -90,16 +92,15 @@ Always pass `headers` to attribute token statistics in Usage Monitors:
   "X-Project-Id": "pi"
 }
 ```
-This ensures token consumption is logged under `client='pi'` in token proxy statistics databases (`tokens.db`).
 
 ### 3. Cost Schema Requirements
 Every model definition in Pi **requires** all 4 cost fields (`input`, `output`, `cacheRead`, `cacheWrite`). Omitting `cacheWrite` will cause Pi to fail loading `models.json` with a schema validation error.
 
-### 4. Setting OpenCode Go as Default Provider (`settings.json`)
-Set `opencode-go` as your primary provider in `~/.pi/agent/settings.json`:
+### 4. Setting Default Provider (`settings.json`)
+Set your primary provider in `~/.pi/agent/settings.json`:
 ```json
 {
-  "defaultProvider": "opencode-go",
+  "defaultProvider": "opencode-go-proxy",
   "defaultModel": "deepseek-v4-flash",
   "defaultThinkingLevel": "max"
 }
