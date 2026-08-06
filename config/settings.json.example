@@ -1,8 +1,8 @@
 {
   "lastChangelogVersion": "0.83.0",
   "enableInstallTelemetry": false,
-  "defaultProvider": "deepseek-cloud",
-  "defaultModel": "deepseek-v4-flash",
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-reasoner",
   "hideThinkingBlock": false,
   "contextFiles": true,
   "compaction": {
