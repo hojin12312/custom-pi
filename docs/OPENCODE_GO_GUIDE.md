@@ -2,27 +2,27 @@
 
 > ℹ️ **Note for General Users**: Most users connecting Pi directly to official Cloud APIs (DeepSeek Official, OpenAI, Anthropic, OpenRouter) **do not need a local proxy**. You can configure standard API endpoints (`https://api.deepseek.com/v1`, `https://api.openai.com/v1`) directly in `models.json`.
 >
-> This guide is intended for advanced setups using **OpenCode Go** (an internal unified proxy gateway).
+> This guide is intended for advanced setups using **OpenCode Go** (an internal unified gateway).
 
 ---
 
 ## 📌 Overview
 
-OpenCode Go acts as an OpenAI-compatible gateway proxy (`openai-completions`) routing requests to various LLM backends (DeepSeek, Kimi, GLM, MiniMax, Qwen, Grok, etc.) with centralized authentication and token tracking.
+OpenCode Go acts as an OpenAI-compatible gateway (`openai-completions`) routing requests to various LLM backends (DeepSeek, Kimi, GLM, MiniMax, Qwen, Grok, etc.) with centralized authentication and token tracking.
 
 ---
 
 ## 🛠️ Configuration (`models.json`)
 
-Add the `opencode-go-proxy` provider to `~/.pi/agent/models.json`:
+Add the `opencode-go` provider to `~/.pi/agent/models.json`:
 
 ```json
 {
   "providers": {
-    "opencode-go-proxy": {
+    "opencode-go": {
       "baseUrl": "http://localhost:8104/v1",
       "api": "openai-completions",
-      "apiKey": "local-go-proxy",
+      "apiKey": "local-go-gateway",
       "headers": {
         "X-Client-Id": "pi",
         "X-Project-Id": "pi"
@@ -80,7 +80,7 @@ To force DeepSeek reasoning effort to **Max** in Pi:
 Set `"defaultThinkingLevel": "max"` in `~/.pi/agent/settings.json`:
 ```json
 {
-  "defaultProvider": "opencode-go-proxy",
+  "defaultProvider": "opencode-go",
   "defaultModel": "deepseek-v4-flash",
   "defaultThinkingLevel": "max"
 }

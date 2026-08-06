@@ -55,11 +55,11 @@
         }
       ]
     },
-    "opencode-go-proxy": {
-      "_comment": "Advanced: Optional OpenCode Go Gateway Proxy",
+    "opencode-go": {
+      "_comment": "Advanced: Optional OpenCode Go Gateway",
       "baseUrl": "http://localhost:8104/v1",
       "api": "openai-completions",
-      "apiKey": "local-go-proxy",
+      "apiKey": "local-go-gateway",
       "headers": {
         "X-Client-Id": "pi",
         "X-Project-Id": "pi"

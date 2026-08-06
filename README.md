@@ -20,7 +20,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 * **Multi-Agent Tasks**: Enables parent Pi sessions to spawn background subagent tasks with bi-directional supervisor communication via native intercom channels.
 
 ### 3. 🌐 OpenCode Go Integration & Max Reasoning Effort
-* **Gateway**: Connects Pi to OpenCode Zen Go Gateway (`opencode-go-proxy`) for unified access to DeepSeek V4, Kimi K3, GLM 5.2, MiniMax, Qwen 3.7 Max, Grok 4.5, etc.
+* **Gateway**: Connects Pi to OpenCode Zen Go Gateway (`opencode-go`) for unified access to DeepSeek V4, Kimi K3, GLM 5.2, MiniMax, Qwen 3.7 Max, Grok 4.5, etc.
 * **DeepSeek Max Reasoning Effort**: Configures DeepSeek models with `defaultThinkingLevel: "max"` in `settings.json` and custom `thinkingLevelMap` in `models.json` for maximum reasoning depth during complex coding.
 * 📖 See **[OpenCode Go Provider Integration Guide](docs/OPENCODE_GO_GUIDE.md)** for detailed setup.
 
@@ -44,8 +44,8 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 Sanitized configuration templates in `config/`:
 
-* **`config/settings.json.example`**: Pre-configured with `defaultProvider: "opencode-go-proxy"`, `defaultThinkingLevel: "max"`, token reserve, and default packages.
-* **`config/models.json.example`**: Complete provider schemas for direct Cloud APIs (DeepSeek Official, OpenAI) & OpenCode Go gateway proxy.
+* **`config/settings.json.example`**: Pre-configured with `defaultProvider: "deepseek"`, `defaultThinkingLevel: "max"`, token reserve, and default packages.
+* **`config/models.json.example`**: Complete provider schemas for direct Cloud APIs (DeepSeek Official, OpenAI) & OpenCode Go gateway.
 * **`config/web-search.json.example`**: 2-tier search routing (Exa → Brave) template.
 
 ---
