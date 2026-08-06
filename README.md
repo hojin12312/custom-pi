@@ -34,7 +34,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
   * **Why it's needed**: High-performance coding models like DeepSeek V4 Flash or DeepSeek R1 are text-only models (`input: ["text"]`). `imageread` bridges this gap by allowing text models to inspect screenshots, charts, and image files via a local VLM endpoint.
   * **Dynamic Tool Activation**: Automatically activates when a text-only model is selected and hides itself when a native vision model (e.g. GPT-4o) is active.
   * **Smart High-Res Tiling & Normalized Crop**: Supports `detail=low` (~1MP overview), `crop` (normalized 0-1000 zoom-in for small text/code), and `detail=high` (tiled full-resolution reading).
-  * **Configurable VLM Backend**: Configured via environment variables (`IMAGEREAD_VLM_URL`, `IMAGEREAD_VLM_MODEL`). Recommended local vision models include Qwen2.5-VL / Qwen3.5-VL (3B / 7B / 35B A3B), InternVL 2.5/3.0 (2B / 4B / 8B), or SmolVLM (2.2B).
+  * **Configurable VLM Backend**: Configured via environment variables (`IMAGEREAD_VLM_URL`, `IMAGEREAD_VLM_MODEL`). Recommended local vision models include Qwen2.5-VL / Qwen3-VL (3B / 7B / 35B A3B), InternVL 2.5/3.0 (2B / 4B / 8B), or SmolVLM (2.2B).
 * 📝 **`todo.ts` (Essential Task Tracker)**:
   * **3-State Task Status**: Tracks task states (`pending`, `in_progress`, `completed`).
   * **`/todos` Command**: Slash command to inspect active task lists during sessions.
