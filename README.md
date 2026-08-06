@@ -30,12 +30,16 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 `custom-pi` includes essential developer productivity tools:
 
+* 👁️ **`imageread.ts` (Local VLM Vision Bridge)**:
+  * **Why it's needed**: High-performance coding models like DeepSeek V4 Flash or DeepSeek R1 are text-only models (`input: ["text"]`). `imageread` bridges this gap by allowing text models to inspect screenshots, charts, and image files via a local VLM endpoint.
+  * **Dynamic Tool Activation**: Automatically activates when a text-only model is selected and hides itself when a native vision model (e.g. GPT-4o) is active.
+  * **Smart High-Res Tiling & Normalized Crop**: Supports `detail=low` (~1MP overview), `crop` (normalized 0-1000 zoom-in for small text/code), and `detail=high` (tiled full-resolution reading).
+  * **Configurable VLM Backend**: Configured via environment variables (`IMAGEREAD_VLM_URL`, `IMAGEREAD_VLM_MODEL`). Recommended local vision models include Qwen2.5-VL / Qwen3.5-VL (3B / 7B / 35B A3B), InternVL 2.5/3.0 (2B / 4B / 8B), or SmolVLM (2.2B).
 * 📝 **`todo.ts` (Essential Task Tracker)**:
   * **3-State Task Status**: Tracks task states (`pending`, `in_progress`, `completed`).
   * **`/todos` Command**: Slash command to inspect active task lists during sessions.
   * **Real-time Terminal UI**: Live progress indicators (`X/Y completed`) in the Pi terminal UI.
 * 🛠️ **`apply_patch.ts` (Multi-file Patching)**: Multi-file Git-style chunk patch tool (`*** Begin Patch ...`). Supports file creation, edits, movement, and deletions in a single tool call.
-* 👁️ **`imageread.ts` (Local VLM Vision)**: Vision integration for text-only coding models. Supports low/high detail reading, tiling, and normalized crop zoom-ins.
 * ❓ **`question.ts` (Interactive Prompts)**: Interactive multi-choice and write-in question modal UI.
 
 ---
