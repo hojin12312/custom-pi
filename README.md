@@ -65,3 +65,11 @@ cd custom-pi
 ## 🔒 Privacy & Security
 
 No private API keys, IP addresses, or secrets are tracked in this repository. Update `settings.json`, `models.json`, and `web-search.json` with your credentials after installation.
+
+---
+
+## 🙏 Credits & Acknowledgements
+
+* **[Pi Coding Agent](https://github.com/earendil-works/pi)**: Core terminal coding agent created by Mario Zechner & Earendil Works.
+* **[pi-subagents](https://www.npmjs.com/package/pi-subagents) & [pi-web-access](https://www.npmjs.com/package/pi-web-access)**: Official subagent orchestration and web search extension packages for Pi.
+* **[OpenCode](https://github.com/anomalyco/opencode)**: Original tool concepts and algorithms adapted for Pi extensions (`apply_patch`, `imageread`).
