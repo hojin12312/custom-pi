@@ -13,6 +13,11 @@ mkdir -p "${PI_EXTENSIONS_DIR}"
 echo "[+] Copying extensions to ${PI_EXTENSIONS_DIR}..."
 cp -fv "${SCRIPT_DIR}/extensions/"*.ts "${PI_EXTENSIONS_DIR}/"
 
+echo "[+] Installing helper scripts to ${HOME}/.local/bin..."
+mkdir -p "${HOME}/.local/bin"
+cp -fv "${SCRIPT_DIR}/scripts/"* "${HOME}/.local/bin/"
+chmod +x "${HOME}/.local/bin/"*
+
 if [ ! -f "${PI_AGENT_DIR}/settings.json" ]; then
     echo "[+] Creating settings.json from template..."
     cp -v "${SCRIPT_DIR}/config/settings.json.example" "${PI_AGENT_DIR}/settings.json"
