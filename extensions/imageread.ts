@@ -1,8 +1,9 @@
 /**
- * ImageRead - Send a local image through a vision backend.
+ * ImageRead - Send a local image through the Studio oMLX VLM backend.
  *
- * Ported from OpenCode's imageread tool. Text-only coding models use this tool
- * to inspect screenshots, charts, and other image files via a local VLM endpoint.
+ * Ported from ~/.config/opencode/tools/imageread.ts. The text-only coding
+ * models use this tool to inspect screenshots, charts, and other image files.
+ * (2026-08-06 MBP vision server :8110 폐기 → Studio oMLX :8080 VLM으로 이관)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -18,10 +19,10 @@ const execFileAsync = promisify(execFile);
 
 const SERVER_URL =
 	process.env.IMAGEREAD_VLM_URL ??
-	"http://localhost:8110/v1/chat/completions";
+	"http://localhost:8080/v1/chat/completions";
 const MODEL_ID =
 	process.env.IMAGEREAD_VLM_MODEL ??
-	"qwen3.6-vision";
+	"qwen3.6-35b-a3b-4bit";
 const API_KEY = process.env.IMAGEREAD_VLM_API_KEY ?? "";
 
 interface CropRegion {
@@ -96,6 +97,7 @@ async function askVlm(imagePath: string, instruction: string, signal?: AbortSign
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
+			"X-Client-Id": "pi",
 			...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
 		},
 		body: JSON.stringify(body),
@@ -237,6 +239,9 @@ async function readImage(
 }
 
 export default function imageRead(pi: ExtensionAPI) {
+	// Extensions are discovered before model selection, so keep the module loaded
+	// but expose the tool only to text-only models. The before_agent_start hook
+	// also covers the initial model, while model_select handles later switches.
 	pi.on("model_select", (_event, ctx) => syncActiveToolForModel(pi, ctx));
 	pi.on("before_agent_start", (_event, ctx) => syncActiveToolForModel(pi, ctx));
 
@@ -244,8 +249,8 @@ export default function imageRead(pi: ExtensionAPI) {
 		name: "imageread",
 		label: "ImageRead",
 		description:
-			"Analyze an image file using a vision model. Use this whenever the user asks about an image or image file because text-only models cannot inspect pixels directly.",
-		promptSnippet: "Read image files through the vision model; start low, then crop for fine detail",
+			"Analyze an image file using the local vision model. Use this whenever the user asks about an image or image file because the text-only model cannot inspect pixels directly. Start with detail=low for the whole image; use crop for small text, charts, or screenshots after inspecting the source dimensions. Use detail=high for large images that require tiled full-resolution reading.",
+		promptSnippet: "Read image files through the local vision model; start low, then crop for fine detail",
 		promptGuidelines: [
 			"Use imageread whenever the task requires inspecting pixels in an image file. Start with detail=low; use the returned source dimensions to request a normalized crop for small text or regions.",
 			"Use detail=high for large images when full-resolution coverage is needed. Do not claim visual details that have not been checked with imageread.",
