@@ -16,9 +16,13 @@
  *     ⚠️ 슬래시 커맨드(/bg)는 툴 실행 중 타이핑하면 pi가 입력을 큐잉했다가
  *     툴이 끝난 뒤에 전달하므로 실행 중 전환에는 쓸 수 없다 (2026-08-07 실측).
  *     따라서 실행 중 전환의 주 경로는 ctrl+q 단축키 + 외부 bgnow 스크립트.
- *  3. /bg [id] — 동일 동작의 슬래시 커맨드 (idle 시 유지용)
+ *  3. /bg [id] — 동일 동작의 슬래시 커맨드
  *  4. /bglist   — 작업 상태 목록 (running/done, exit code, cmd 요약, log 경로)
  *  5. /bgkill <id|all> — 작업 프로세스 그룹 종료 (SIGTERM → SIGKILL)
+ *     ⚠️ /bg·/bglist·/bgkill 은 실제로 백그라운드된 살아있는 프로세스가 있을 때만
+ *     등록·노출된다 (세션 시작 시 잔여 작업, 첫 백그라운드 전환 시점). 미등록 상태에서
+ *     타이핑하면 비활성 안내만 한다. pi에 커맨드 언레지스터가 없어 최초 등록 후에는
+ *     세션 동안 유지되며, /reload 시 재평가된다.
  *  6. passive 통지: 다음 유저 프롬프트(input, source=interactive)에
  *     - 완료된 작업(아직 통지 안 한 것만, 1회): "작업 <id> 완료 (exit N) + 로그 tail"
  *     - 실행 중인 작업: "작업 <id> 실행 중 (cmd 요약, log 경로)"
@@ -269,34 +273,26 @@ function tryBackground(arg?: string): { ok: boolean; message: string } {
 }
 
 // ---------------------------------------------------------------------------
-// 툴 콜 래핑
+// 조건부 커맨드 등록
+// 실제로 백그라운드로 전환된 살아있는 프로세스가 있을 때만 /bg 계열을 노출한다.
+// (pi API에 커맨드 언레지스터가 없어, 최초 등록 후에는 세션 동안 유지된다.
+//  메뉴 갱신은 identity autocomplete wrapper로 트리거한다.)
 // ---------------------------------------------------------------------------
-export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", (event) => {
-		if (!isToolCallEventType("bash", event)) return;
-		let cmd = event.input.command;
-		if (cmd.includes(BG_OFF_MARKER)) {
-			event.input.command = cmd.split(BG_OFF_MARKER).join("");
-			return;
-		}
-		event.input.command = wrapCommand(cmd);
-	});
+let bgCommandsRegistered = false;
 
-	// -----------------------------------------------------------------------
-	// ctrl+q — 실행 중인 bash 명령을 백그라운드로 전환 (주 경로)
-	// 툴 실행 중 타이핑은 큐잉되지만 단축키는 키 레벨에서 즉시 처리된다.
-	// -----------------------------------------------------------------------
-	pi.registerShortcut("ctrl+q", {
-		description: "Send the running bash command to background",
-		handler: async (ctx) => {
-			const r = tryBackground();
-			ctx.ui.notify(`[bg-s] ${r.message}`, r.ok ? "info" : "warning");
-		},
-	});
+/** "남아있는 bg 프로세스": 래퍼가 빠지고(wrapperAlive=false) 작업이 살아있는 상태 */
+function hasBackgroundedJob(): boolean {
+	return scanJobs().some((j) => j.status === "running" && !j.wrapperAlive);
+}
 
-	// -----------------------------------------------------------------------
-	// /bg [id] — 백그라운드 전환 (idle 상태에서의 폴백/명시적 id 지정용)
-	// -----------------------------------------------------------------------
+interface AutocompleteUi {
+	addAutocompleteProvider(f: (current: unknown) => unknown): void;
+}
+
+function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
+	if (bgCommandsRegistered) return;
+	bgCommandsRegistered = true;
+
 	pi.registerCommand("bg", {
 		description: "Send the running bash command to background (usage: /bg [jobid]; 단축키 ctrl+q 권장)",
 		handler: async (args, ctx) => {
@@ -305,9 +301,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// -----------------------------------------------------------------------
-	// /bglist — 작업 목록
-	// -----------------------------------------------------------------------
 	pi.registerCommand("bglist", {
 		description: "List background jobs",
 		handler: async (_args, ctx) => {
@@ -327,9 +320,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// -----------------------------------------------------------------------
-	// /bgkill <id|all> — 작업 종료
-	// -----------------------------------------------------------------------
 	pi.registerCommand("bgkill", {
 		description: "Kill a background job (usage: /bgkill <jobid|all>)",
 		handler: async (args, ctx) => {
@@ -356,14 +346,75 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// 커맨드 등록 직후 자동완성 메뉴를 재빌드해 새 커맨드를 즉시 노출 (identity wrapper)
+	ui?.addAutocompleteProvider((current) => current);
+}
+
+// ---------------------------------------------------------------------------
+// 툴 콜 래핑
+// ---------------------------------------------------------------------------
+export default function (pi: ExtensionAPI) {
+	pi.on("tool_call", (event) => {
+		if (!isToolCallEventType("bash", event)) return;
+		let cmd = event.input.command;
+		if (cmd.includes(BG_OFF_MARKER)) {
+			event.input.command = cmd.split(BG_OFF_MARKER).join("");
+			return;
+		}
+		event.input.command = wrapCommand(cmd);
+	});
+
 	// -----------------------------------------------------------------------
-	// passive 통지 — 다음 유저 프롬프트에 작업 상태 삽입
+	// ctrl+q — 실행 중인 bash 명령을 백그라운드로 전환 (주 경로)
+	// 툴 실행 중 타이핑은 큐잉되지만 단축키는 키 레벨에서 즉시 처리된다.
+	// -----------------------------------------------------------------------
+	pi.registerShortcut("ctrl+q", {
+		description: "Send the running bash command to background",
+		handler: async (ctx) => {
+			const r = tryBackground();
+			if (r.ok) registerBgCommands(pi, ctx.ui);
+			ctx.ui.notify(`[bg-s] ${r.message}`, r.ok ? "info" : "warning");
+		},
+	});
+
+	// -----------------------------------------------------------------------
+	// /bg 계열 커맨드 노출 조건:
+	//  - 세션 시작 시 잔여 백그라운드 프로세스가 있으면 등록
+	//  - bash 툴 콜이 백그라운드 상태로 종료되면 등록 (ctrl+q/bgnow 등 외부 경로 포함)
+	//  - input 핸들러에서 백그라운드 작업 발견 시에도 등록
+	// -----------------------------------------------------------------------
+	pi.on("session_start", (event, ctx) => {
+		if (hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		if (event.toolName === "bash" && hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
+	});
+
+	// -----------------------------------------------------------------------
+	// passive 통지 — 다음 유저 프롬프트에 작업 상태 삽입 (+ 미등록 /bg* 폴백)
 	// -----------------------------------------------------------------------
 	pi.on("input", (event, ctx) => {
 		if (event.source !== "interactive") return { action: "continue" };
 		if (!event.text || !event.text.trim()) return { action: "continue" };
+		const text = event.text.trim();
+
+		// 미등록 상태에서 /bg 계열 타이핑 → 작업이 없어 비활성화 상태임을 안내
+		if (
+			!bgCommandsRegistered &&
+			(text === "/bg" ||
+				text.startsWith("/bg ") ||
+				text === "/bglist" ||
+				text.startsWith("/bglist ") ||
+				text === "/bgkill" ||
+				text.startsWith("/bgkill "))
+		) {
+			ctx.ui.notify("백그라운드 작업이 없어 /bg 계열 명령이 비활성화되어 있습니다", "warning");
+			return { action: "handled" };
+		}
 
 		const jobs = scanJobs();
+		if (hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
 		const completed = jobs.filter((j) => j.status === "done" && !existsSync(join(j.dir, "notified")));
 		const running = jobs.filter((j) => j.status === "running");
 		if (completed.length === 0 && running.length === 0) return { action: "continue" };
