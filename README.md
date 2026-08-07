@@ -32,6 +32,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 `custom-pi` includes essential developer productivity tools:
 
+* 🔍 **`web_search_content.ts` (OpenCode-style Raw Web Search)**: Port of OpenCode's built-in `websearch` tool (Exa MCP `web_search_exa`). Returns **RAW page content** (up to 10k chars/result, `livecrawl: fallback` for fresh pages) instead of a synthesized answer — the model reads sources and answers directly with exact details. **Usage split vs `web_search` (pi-web-access)**: `web_search_content` = quick factual lookups needing ground truth (versions, params, errors, code); `web_search` = broad multi-query research / synthesized overviews; `fetch_content` = fetching a known URL. Compact one-line TUI rendering. Uses `EXA_API_KEY` env (falls back to keyless Exa MCP free tier).
 * 🔄 **`auto_continue_compact.ts` (Smart Auto-Continue on Compaction)**:
   * **2-Step Decision Gate**: Automatically detects context compaction (`session_compact`) and prompts the model to evaluate if output was cut off mid-task (`STATUS: TRUNCATED`).
   * **Seamless Task Resume**: Automatically sends a clean follow-up prompt to re-render broken tables/code blocks and resume interrupted tasks without manual intervention.
