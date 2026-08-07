@@ -23,7 +23,9 @@
  *     등록·노출된다 (세션 시작 시 잔여 작업, 첫 백그라운드 전환 시점). 미등록 상태에서
  *     타이핑하면 비활성 안내만 한다. pi에 커맨드 언레지스터가 없어 최초 등록 후에는
  *     세션 동안 유지되며, /reload 시 재평가된다.
- *  6. passive 통지: 다음 유저 프롬프트(input, source=interactive)에
+ *     각 작업에는 소유 Pi session id를 기록하고, 정상 포그라운드 완료 시 임시 기록을
+ *     제거한다. ctrl+q/SIGUSR1 전환 때만 backgrounded 표식을 남긴다.
+ *  6. passive 통지: 작업을 시작한 동일 세션의 다음 유저 프롬프트(input, source=interactive)에
  *     - 완료된 작업(아직 통지 안 한 것만, 1회): "작업 <id> 완료 (exit N) + 로그 tail"
  *     - 실행 중인 작업: "작업 <id> 실행 중 (cmd 요약, log 경로)"
  *     을 사용자 메시지 앞에 삽입한다. 완료 즉시 턴을 만들지 않는다 (방해 금지).
@@ -39,17 +41,17 @@
 import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, rmSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
-const BG_DIR = "/tmp/pi-bg";
+const BG_DIR = process.env.PI_BG_DIR?.trim() || "/tmp/pi-bg";
 const BG_OFF_MARKER = "# bg:off";
 const STALE_MS = 24 * 60 * 60 * 1000; // 완료/유실 작업 디렉토리 보존 후 정리
 
 // ---------------------------------------------------------------------------
 // 래퍼 (bash). 원본 명령은 base64 로 임베드해서 따옴표/줄바꿈 이슈를 회피한다.
 // ---------------------------------------------------------------------------
-function wrapCommand(original: string): string {
+function wrapCommand(original: string, sessionId: string): string {
 	const b64 = Buffer.from(original, "utf8").toString("base64");
+	const sessionB64 = Buffer.from(sessionId, "utf8").toString("base64");
 	return [
 		`set +e`,
 		`JOBID="$$-$(date +%s)"`,
@@ -60,8 +62,9 @@ function wrapCommand(original: string): string {
 		`B64DEC="base64 -D"`,
 		`if printf 'aGk=' | base64 -d >/dev/null 2>&1; then B64DEC="base64 -d"; fi`,
 		`printf '%s' '${b64}' | $B64DEC > "$DIR/cmd" 2>/dev/null`,
+		`printf '%s' '${sessionB64}' | $B64DEC > "$DIR/session" 2>/dev/null`,
 		`BG=0`,
-		`trap 'BG=1' USR1`,
+		`trap 'BG=1; : > "$DIR/backgrounded"' USR1`,
 		`{ eval "$(cat "$DIR/cmd")"; C=$?; echo "$C" > "$DIR/exit"; exit $C; } >"$LOG" 2>&1 &`,
 		`JOBPID=$!`,
 		`echo "$JOBPID" > "$DIR/jobpid"`,
@@ -80,6 +83,7 @@ function wrapCommand(original: string): string {
 		`wait "$JOBPID" 2>/dev/null`,
 		`CODE=$?`,
 		`echo "[done] exit=$CODE" >&2`,
+		`if [ ! -e "$DIR/backgrounded" ]; then rm -rf "$DIR"; fi`,
 		`exit $CODE`,
 	].join("\n");
 }
@@ -98,6 +102,8 @@ interface JobInfo {
 	status: "running" | "done" | "gone";
 	exitCode?: number;
 	wrapperAlive: boolean;
+	sessionId: string;
+	backgrounded: boolean;
 }
 
 function readInt(path: string): number {
@@ -173,6 +179,13 @@ function scanJobs(): JobInfo[] {
 		} catch {
 			/* cmd 파일이 아직 없을 수 있음 */
 		}
+		let sessionId = "";
+		try {
+			sessionId = readFileSync(join(dir, "session"), "utf8").trim();
+		} catch {
+			/* 구버전 작업에는 session 파일이 없음 */
+		}
+		const backgrounded = existsSync(join(dir, "backgrounded"));
 
 		let status: JobInfo["status"];
 		let exitCode: number | undefined;
@@ -206,6 +219,8 @@ function scanJobs(): JobInfo[] {
 			status,
 			exitCode,
 			wrapperAlive: isAlive(wrapperPid),
+			sessionId,
+			backgrounded,
 		});
 	}
 	return jobs;
@@ -243,8 +258,10 @@ function killJob(j: JobInfo): boolean {
 // ---------------------------------------------------------------------------
 // 백그라운드 전환 공통 로직 (단축키 + /bg 커맨드 공유)
 // ---------------------------------------------------------------------------
-function tryBackground(arg?: string): { ok: boolean; message: string } {
-	const active = scanJobs().filter((j) => j.status === "running");
+function tryBackground(sessionId: string, arg?: string): { ok: boolean; message: string } {
+	const active = scanJobs().filter(
+		(j) => j.sessionId === sessionId && j.status === "running" && j.wrapperAlive && !j.backgrounded,
+	);
 	if (active.length === 0) {
 		return { ok: false, message: "백그라운드로 보낼 실행 중인 작업이 없습니다" };
 	}
@@ -258,18 +275,19 @@ function tryBackground(arg?: string): { ok: boolean; message: string } {
 	} else {
 		target = active.sort((a, b) => b.started - a.started)[0];
 	}
-	if (!target.wrapperAlive) {
-		return {
-			ok: false,
-			message: `작업 ${target.id} 는 이미 백그라운드 상태입니다 (명령 요약: ${cmdSummary(target.cmd)})`,
-		};
-	}
 	try {
 		process.kill(target.wrapperPid, "SIGUSR1");
-		return { ok: true, message: `작업 ${target.id} 를 백그라운드로 전환했습니다 (log: ${target.logPath})` };
 	} catch (e) {
 		return { ok: false, message: `전환 실패: ${(e as Error).message}` };
 	}
+	// 래퍼의 USR1 trap도 같은 표식을 쓰지만, 신호 전달 성공 직후 기록해
+	// 매우 짧은 작업의 종료 race에서도 전환 사실을 보존한다.
+	try {
+		writeFileSync(join(target.dir, "backgrounded"), "1");
+	} catch {
+		/* trap이 표식을 기록하므로 신호 전달 성공 자체는 유지 */
+	}
+	return { ok: true, message: `작업 ${target.id} 를 백그라운드로 전환했습니다 (log: ${target.logPath})` };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,8 +299,10 @@ function tryBackground(arg?: string): { ok: boolean; message: string } {
 let bgCommandsRegistered = false;
 
 /** "남아있는 bg 프로세스": 래퍼가 빠지고(wrapperAlive=false) 작업이 살아있는 상태 */
-function hasBackgroundedJob(): boolean {
-	return scanJobs().some((j) => j.status === "running" && !j.wrapperAlive);
+function hasBackgroundedJob(sessionId: string): boolean {
+	return scanJobs().some(
+		(j) => j.sessionId === sessionId && j.backgrounded && j.status === "running" && !j.wrapperAlive,
+	);
 }
 
 interface AutocompleteUi {
@@ -296,7 +316,7 @@ function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
 	pi.registerCommand("bg", {
 		description: "Send the running bash command to background (usage: /bg [jobid]; 단축키 ctrl+q 권장)",
 		handler: async (args, ctx) => {
-			const r = tryBackground(args);
+			const r = tryBackground(ctx.sessionManager.getSessionId(), args);
 			ctx.ui.notify(r.message, r.ok ? "info" : "warning");
 		},
 	});
@@ -304,7 +324,8 @@ function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
 	pi.registerCommand("bglist", {
 		description: "List background jobs",
 		handler: async (_args, ctx) => {
-			const jobs = scanJobs();
+			const sessionId = ctx.sessionManager.getSessionId();
+			const jobs = scanJobs().filter((j) => j.sessionId === sessionId && j.backgrounded);
 			if (jobs.length === 0) {
 				ctx.ui.notify("백그라운드 작업 없음", "info");
 				return;
@@ -328,7 +349,10 @@ function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
 				ctx.ui.notify("사용법: /bgkill <jobid|all>", "warning");
 				return;
 			}
-			const jobs = scanJobs().filter((j) => j.status !== "gone");
+			const sessionId = ctx.sessionManager.getSessionId();
+			const jobs = scanJobs().filter(
+				(j) => j.sessionId === sessionId && j.backgrounded && j.status !== "gone",
+			);
 			const targets = arg === "all" ? jobs : jobs.filter((j) => j.id === arg);
 			if (targets.length === 0) {
 				ctx.ui.notify(`종료할 작업이 없습니다: ${arg}`, "warning");
@@ -354,14 +378,14 @@ function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
 // 툴 콜 래핑
 // ---------------------------------------------------------------------------
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", (event) => {
-		if (!isToolCallEventType("bash", event)) return;
-		let cmd = event.input.command;
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
+		const cmd = event.input.command;
 		if (cmd.includes(BG_OFF_MARKER)) {
 			event.input.command = cmd.split(BG_OFF_MARKER).join("");
 			return;
 		}
-		event.input.command = wrapCommand(cmd);
+		event.input.command = wrapCommand(cmd, ctx.sessionManager.getSessionId());
 	});
 
 	// -----------------------------------------------------------------------
@@ -371,7 +395,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerShortcut("ctrl+q", {
 		description: "Send the running bash command to background",
 		handler: async (ctx) => {
-			const r = tryBackground();
+			const r = tryBackground(ctx.sessionManager.getSessionId());
 			if (r.ok) registerBgCommands(pi, ctx.ui);
 			ctx.ui.notify(`[bg-s] ${r.message}`, r.ok ? "info" : "warning");
 		},
@@ -384,11 +408,13 @@ export default function (pi: ExtensionAPI) {
 	//  - input 핸들러에서 백그라운드 작업 발견 시에도 등록
 	// -----------------------------------------------------------------------
 	pi.on("session_start", (event, ctx) => {
-		if (hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
+		if (hasBackgroundedJob(ctx.sessionManager.getSessionId())) registerBgCommands(pi, ctx.ui);
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
-		if (event.toolName === "bash" && hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
+		if (event.toolName === "bash" && hasBackgroundedJob(ctx.sessionManager.getSessionId())) {
+			registerBgCommands(pi, ctx.ui);
+		}
 	});
 
 	// -----------------------------------------------------------------------
@@ -413,8 +439,9 @@ export default function (pi: ExtensionAPI) {
 			return { action: "handled" };
 		}
 
-		const jobs = scanJobs();
-		if (hasBackgroundedJob()) registerBgCommands(pi, ctx.ui);
+		const sessionId = ctx.sessionManager.getSessionId();
+		const jobs = scanJobs().filter((j) => j.sessionId === sessionId && j.backgrounded);
+		if (hasBackgroundedJob(sessionId)) registerBgCommands(pi, ctx.ui);
 		const completed = jobs.filter((j) => j.status === "done" && !existsSync(join(j.dir, "notified")));
 		const running = jobs.filter((j) => j.status === "running");
 		if (completed.length === 0 && running.length === 0) return { action: "continue" };

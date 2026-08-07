@@ -2,7 +2,7 @@
 
 Custom extensions, core packages, and configuration templates for [Pi Coding Agent](https://github.com/earendil-works/pi).
 
-> 🕒 **Last Updated**: 2026-08-06 23:14:30 (KST)
+> 🕒 **Last Updated**: 2026-08-08 02:12:38 (KST)
 
 ---
 
@@ -34,10 +34,10 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 * 🚪 **`core_commands.ts` (Extra Slash Commands)**: Adds `/exit` (graceful Pi shutdown, same as `/quit` via `ctx.shutdown()`) and `/clear` (start a new session, same as `/new` via `ctx.newSession()`). Implemented as an extension so it survives Pi updates.
 * 🕐 **`bg.ts` (Bash Background Runner)**: Long-running bash commands (downloads, builds) can be pushed to the background so the agent keeps working on other tasks.
-  * **`ctrl+q` during a tool run** — moves the running command to background: the tool call returns immediately with a `[bg] moved to background` notice, and the agent continues its turn while the job keeps running (output → `/tmp/pi-bg/<jobid>/log`). Also available outside pi via the `bgnow` helper script (run from another tmux pane).
-  * **Passive completion notice** — finished jobs are announced on the **next user prompt** (no interruption): `[bg notice] 작업 <id> 완료 (exit N) + output tail`. Only once per job.
-  * **`/bglist` / `/bgkill <id|all>`** — job status list (`⏳ running [bg]`, `✓ done`, `✗ failed`, `💀 gone`) and process-group kill (SIGTERM → SIGKILL).
-  * **Notes**: Every LLM bash call is wrapped (output is tail-streamed to the TUI); `# bg:off` inside a command opts out. Slash-command input is queued while a tool runs, so the `ctrl+q` shortcut is the primary path. `/bg`·`/bglist`·`/bgkill` are **only exposed when backgrounded jobs exist** (registered on first transition, menu refreshes immediately; re-evaluated on `/reload`). Rollback: remove the file + `/reload`.
+  * **`ctrl+q` during a tool run** — moves the running command owned by the **current Pi session** to background: the tool call returns immediately with a `[bg] moved to background` notice, and the agent continues its turn while the job keeps running (output → `/tmp/pi-bg/<jobid>/log`). Also available outside Pi via `bgnow [jobid]`; when multiple sessions have foreground jobs, `bgnow` requires an explicit job ID.
+  * **Session-scoped passive notice** — only jobs explicitly moved with `ctrl+q`/`bgnow` are announced in the **originating session's next user prompt**: `[bg notice] 작업 <id> 완료 (exit N) + output tail`. Ordinary foreground Bash calls and newly created Pi sessions do not receive these notices. Completion is announced only once per job.
+  * **`/bglist` / `/bgkill <id|all>`** — current-session background job status (`⏳ running [bg]`, `✓ done`, `✗ failed`, `💀 gone`) and process-group kill (SIGTERM → SIGKILL).
+  * **Notes**: Every LLM Bash call is provisionally wrapped so `ctrl+q` remains available, but normal foreground completion removes its temporary metadata. Each transitioned job records both the Pi session ID and an explicit `backgrounded` marker; legacy global records without these fields are ignored. `# bg:off` opts out of wrapping. Slash-command input is queued while a tool runs, so `ctrl+q` is the primary path. `/bg`·`/bglist`·`/bgkill` are exposed after a current-session job is backgrounded (Pi has no command-unregister API, so registration lasts until `/reload`). Rollback: remove the file + `/reload`.
 * 🔍 **`web_search_content.ts` (OpenCode-style Raw Web Search)**: Port of OpenCode's built-in `websearch` tool (Exa MCP `web_search_exa`). Returns **RAW page content** (up to 10k chars/result, `livecrawl: fallback` for fresh pages) instead of a synthesized answer — the model reads sources and answers directly with exact details. **Usage split vs `web_search` (pi-web-access)**: `web_search_content` = quick factual lookups needing ground truth (versions, params, errors, code); `web_search` = broad multi-query research / synthesized overviews; `fetch_content` = fetching a known URL. Compact one-line TUI rendering. Uses `EXA_API_KEY` env (falls back to keyless Exa MCP free tier).
 * 🔄 **`auto_continue_compact.ts` (Smart Auto-Continue on Compaction)**:
   * **2-Step Decision Gate**: Automatically detects context compaction (`session_compact`) and prompts the model to evaluate if output was cut off mid-task (`STATUS: TRUNCATED`).
@@ -89,4 +89,3 @@ No private API keys, IP addresses, or secrets are tracked in this repository. Up
 * **[Pi Coding Agent](https://github.com/earendil-works/pi)**: Core terminal coding agent created by Mario Zechner & Earendil Works.
 * **[pi-subagents](https://www.npmjs.com/package/pi-subagents) & [pi-web-access](https://www.npmjs.com/package/pi-web-access)**: Official subagent orchestration and web search extension packages for Pi.
 * **[OpenCode](https://github.com/anomalyco/opencode)**: Original tool concepts and algorithms adapted for Pi extensions (`apply_patch`, `imageread`).
-

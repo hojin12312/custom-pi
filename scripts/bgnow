@@ -1,18 +1,55 @@
 #!/usr/bin/env bash
 # bgnow — 실행 중인 pi bash 툴 작업을 백그라운드로 전환 (SIGUSR1)
-# 사용법: bgnow [jobid]  (미지정 시 가장 최근 실행 중인 작업)
+# 사용법: bgnow [jobid]  (미지정 시 전환 가능한 작업이 하나일 때만 선택)
 # 다른 tmux 패널 등 pi 밖에서 실행 가능. pi 내부에서는 ctrl+q 단축키가 주 경로.
-BG_DIR="/tmp/pi-bg"
-latest=""
-for d in "$BG_DIR"/*/; do
-  [ -d "$d" ] || continue
-  [ -e "$d/exit" ] && continue
+BG_DIR="${PI_BG_DIR:-/tmp/pi-bg}"
+
+eligible() {
+  local d="$1" wp jobpid
+  [ -d "$d" ] || return 1
+  [ -f "$d/session" ] || return 1
+  [ ! -e "$d/exit" ] || return 1
+  [ ! -e "$d/backgrounded" ] || return 1
+  wp=$(cat "$d/pid" 2>/dev/null || echo 0)
   jobpid=$(cat "$d/jobpid" 2>/dev/null || echo 0)
-  if kill -0 "$jobpid" 2>/dev/null; then
-    if [ -z "$latest" ] || [ "$d" -nt "$latest" ]; then latest="$d"; fi
+  kill -0 "$wp" 2>/dev/null && kill -0 "$jobpid" 2>/dev/null
+}
+
+target=""
+if [ -n "${1:-}" ]; then
+  case "$1" in
+    */*|.|..) echo "bgnow: 잘못된 jobid: $1" >&2; exit 2 ;;
+  esac
+  target="$BG_DIR/$1"
+  if ! eligible "$target"; then
+    echo "bgnow: 전환 가능한 작업이 아님: $1" >&2
+    exit 1
   fi
-done
-if [ -z "$latest" ]; then echo "bgnow: 실행 중인 작업 없음" >&2; exit 1; fi
-latest="${latest%/}"
-wp=$(cat "$latest/pid")
-kill -USR1 "$wp" && echo "bgnow: 작업 $(basename "$latest") → 백그라운드 전환 (log: $latest/log)"
+else
+  candidates=()
+  for d in "$BG_DIR"/*/; do
+    d="${d%/}"
+    eligible "$d" && candidates+=("$d")
+  done
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    echo "bgnow: 전환 가능한 실행 중 작업 없음" >&2
+    exit 1
+  fi
+  if [ "${#candidates[@]}" -gt 1 ]; then
+    echo "bgnow: 여러 Pi 세션의 작업이 실행 중입니다. jobid를 지정하세요:" >&2
+    for d in "${candidates[@]}"; do
+      printf '  %s  session=%s\n' "$(basename "$d")" "$(cat "$d/session" 2>/dev/null)" >&2
+    done
+    exit 2
+  fi
+  target="${candidates[0]}"
+fi
+
+wp=$(cat "$target/pid")
+if kill -USR1 "$wp"; then
+  : > "$target/backgrounded"
+  echo "bgnow: 작업 $(basename "$target") → 백그라운드 전환 (log: $target/log)"
+else
+  echo "bgnow: 전환 신호 전달 실패: $(basename "$target")" >&2
+  exit 1
+fi
