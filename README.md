@@ -42,11 +42,17 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 * 🔄 **`auto_continue_compact.ts` (Smart Auto-Continue on Compaction)**:
   * **2-Step Decision Gate**: Automatically detects context compaction (`session_compact`) and prompts the model to evaluate if output was cut off mid-task (`STATUS: TRUNCATED`).
   * **Seamless Task Resume**: Automatically sends a clean follow-up prompt to re-render broken tables/code blocks and resume interrupted tasks without manual intervention.
+* 🛡️ **`abnormal-stop-watchdog.ts` (Abnormal Stop Watchdog)** — detects when the agent stops mid-task and resumes it:
+  * **Premature-stop detection**: A turn that ends with `stopReason: stop`, **no tool calls**, and a stub response (empty text, a bare checklist item like `6. …`, or short text without any closing summary) right after tool activity is flagged as a possible mid-task stop.
+  * **LLM verdict gate**: Before acting, a cheap local judge call classifies the last response as `COMPLETE` / `INCOMPLETE` (default endpoint `PI_WD_JUDGE_URL` → `http://127.0.0.1:8104/v1/chat/completions`, model `PI_WD_JUDGE_MODEL` → `deepseek-v4-flash`; reasoning disabled via `reasoning_effort: none`).
+  * **Auto-resume**: On `INCOMPLETE`, injects a "continue from where you stopped" user message via `pi.sendUserMessage` — capped at `PI_WD_MAX_RESUMES` (default 2) per user prompt, with duplicate-turn protection.
+  * **Guardrail**: Appends a "never end mid-task" rule to the system prompt on every turn (`before_agent_start`).
+  * **Observability**: `/wd-status` command + event log at `/tmp/pi-abnormal-stop-watchdog.log`.
 * 👁️ **`imageread.ts` (Local VLM Vision Bridge)**:
   * **Why it's needed**: High-performance coding models like DeepSeek V4 Flash or DeepSeek R1 are text-only models (`input: ["text"]`). `imageread` bridges this gap by allowing text models to inspect screenshots, charts, and image files via a local VLM endpoint.
   * **Dynamic Tool Activation**: Automatically activates when a text-only model is selected and hides itself when a native vision model (e.g. GPT-4o) is active.
   * **Smart High-Res Tiling & Normalized Crop**: Supports `detail=low` (~1MP overview), `crop` (normalized 0-1000 zoom-in for small text/code), and `detail=high` (tiled full-resolution reading).
-  * **Configurable VLM Backend**: Configured via environment variables (`IMAGEREAD_VLM_URL`, `IMAGEREAD_VLM_MODEL`), using **Qwen3.6 35B A3B** served by PICS (via Studio pics-token-proxy `:8098`; token stats logged as `pics_tokens(client=pi)`). Studio/MBP use `localhost:8098` (MBP via SSH tunnel); PICS server itself sets `IMAGEREAD_VLM_URL=https://studio.tailf8a255.ts.net:8098/v1/chat/completions`. Auth key in `IMAGEREAD_VLM_API_KEY`.
+  * **Configurable VLM Backend**: Configured via environment variables (`IMAGEREAD_VLM_URL`, `IMAGEREAD_VLM_MODEL`), using **Qwen3.6 35B A3B** served by a local VLM backend (`localhost:8098` via token proxy; token stats logged by the proxy). Remote hosts point `IMAGEREAD_VLM_URL` at their own backend address. Auth key in `IMAGEREAD_VLM_API_KEY`.
 * 📝 **`todo.ts` (Essential Task Tracker)**:
   * **3-State Task Status**: Tracks task states (`pending`, `in_progress`, `completed`).
   * **`/todos` Command**: Slash command to inspect active task lists during sessions.

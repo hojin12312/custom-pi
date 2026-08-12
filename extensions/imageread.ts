@@ -1,13 +1,11 @@
 /**
- * ImageRead - Send a local image through the PICS VLM backend via the
- * Studio pics-token-proxy (:8098, `pics_tokens` 단일 집계).
+ * ImageRead - Send a local image through a local VLM backend via the
+ * token proxy (:8098).
  *
- * Ported from ~/.config/opencode/tools/imageread.ts. The text-only coding
+ * Ported from the opencode tools setup. The text-only coding
  * models use this tool to inspect screenshots, charts, and other image files.
- * (2026-08-06 MBP vision server :8110 폐기 → Studio oMLX :8080,
- *  2026-08-09 → PICS Qwen3.6 35B A3B. 토큰 통계는 pics_tokens(client=pi).
- *  Studio/MBP는 localhost:8098(SSH 터널), PICS는 IMAGEREAD_VLM_URL로
- *  https://studio.tailf8a255.ts.net:8098/v1/chat/completions 사용)
+ * (VLM backend history: oMLX :8080 → Qwen3.6 35B A3B via local :8098;
+ *  token stats logged by the token proxy.)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
