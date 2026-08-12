@@ -118,3 +118,6 @@ Always pass `headers` to attribute token statistics in Usage Monitors:
 
 ### 3. Cost Schema Requirements
 Every model definition in Pi **requires** all 4 cost fields (`input`, `output`, `cacheRead`, `cacheWrite`). Omitting `cacheWrite` will cause Pi to fail loading `models.json` with a schema validation error.
+
+### 4. Watchdog Judge Uses the Same Local Gateway
+The `abnormal-stop-watchdog` extension's judge call defaults to `http://localhost:8104/v1/chat/completions` (`PI_WD_JUDGE_URL`, model `PI_WD_JUDGE_MODEL` → `deepseek-v4-flash`; reasoning disabled via `reasoning_effort: none`) — the same local gateway described above. Remote hosts should point `PI_WD_JUDGE_URL` at their tailnet address and `X-Client-Id: watchdog` is sent for usage attribution.
