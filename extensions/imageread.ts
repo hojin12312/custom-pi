@@ -1,9 +1,13 @@
 /**
- * ImageRead - Send a local image through the Studio oMLX VLM backend.
+ * ImageRead - Send a local image through the PICS VLM backend via the
+ * Studio pics-token-proxy (:8098, `pics_tokens` 단일 집계).
  *
  * Ported from ~/.config/opencode/tools/imageread.ts. The text-only coding
  * models use this tool to inspect screenshots, charts, and other image files.
- * (2026-08-06 MBP vision server :8110 폐기 → Studio oMLX :8080 VLM으로 이관)
+ * (2026-08-06 MBP vision server :8110 폐기 → Studio oMLX :8080,
+ *  2026-08-09 → PICS Qwen3.6 35B A3B. 토큰 통계는 pics_tokens(client=pi).
+ *  Studio/MBP는 localhost:8098(SSH 터널), PICS는 IMAGEREAD_VLM_URL로
+ *  https://studio.tailf8a255.ts.net:8098/v1/chat/completions 사용)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -19,10 +23,10 @@ const execFileAsync = promisify(execFile);
 
 const SERVER_URL =
 	process.env.IMAGEREAD_VLM_URL ??
-	"http://localhost:8080/v1/chat/completions";
+	"http://localhost:8098/v1/chat/completions";
 const MODEL_ID =
 	process.env.IMAGEREAD_VLM_MODEL ??
-	"qwen3.6-35b-a3b-4bit";
+	"Qwen3.6 35B A3B";
 const API_KEY = process.env.IMAGEREAD_VLM_API_KEY ?? "";
 
 interface CropRegion {
