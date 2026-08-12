@@ -1,8 +1,16 @@
 {
   "workflow": "none",
-  "braveApiKey": "YOUR_BRAVE_API_KEY",
+  "braveApiKey": "YOUR_API_KEY",
   "searchRouting": {
-    "providers": ["exa", "brave"],
-    "fallbackOn": ["transient", "quota", "network"]
-  }
+    "providers": [
+      "exa",
+      "brave"
+    ],
+    "fallbackOn": [
+      "transient",
+      "quota",
+      "network"
+    ]
+  },
+  "exaApiKey": "YOUR_API_KEY"
 }
