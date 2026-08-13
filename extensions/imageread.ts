@@ -19,6 +19,12 @@ import { Type } from "typebox";
 
 const execFileAsync = promisify(execFile);
 
+// Qwen3.6 같은 reasoning 모델은 chain-of-thought가 max_tokens를 소진하면
+// content가 빈 채(finish_reason="length")로 끝날 수 있다.
+// 예산을 키워가며 재시도하고, 그래도 빈 응답이면 명시적 에러를 던진다.
+const MAX_ATTEMPTS = 3;
+const BASE_MAX_TOKENS = 8192;
+
 const SERVER_URL =
 	process.env.IMAGEREAD_VLM_URL ??
 	"http://localhost:8098/v1/chat/completions";
@@ -77,45 +83,57 @@ async function runSips(args: string[], signal?: AbortSignal): Promise<string> {
 
 async function askVlm(imagePath: string, instruction: string, signal?: AbortSignal): Promise<string> {
 	const image = await readFile(imagePath);
-	const body = {
+	const imageDataUrl = `data:image/jpeg;base64,${image.toString("base64")}`;
+	const baseBody = {
 		model: MODEL_ID,
 		messages: [
 			{
 				role: "user",
 				content: [
 					{ type: "text", text: instruction },
-					{
-						type: "image_url",
-						image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` },
-					},
+					{ type: "image_url", image_url: { url: imageDataUrl } },
 				],
 			},
 		],
-		max_tokens: 1024,
 		temperature: 0.1,
 	};
 
-	const response = await fetch(SERVER_URL, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"X-Client-Id": "pi",
-			...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
-		},
-		body: JSON.stringify(body),
-		signal: signal ?? AbortSignal.timeout(300_000),
-	});
+	let lastFinishReason = "unknown";
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		const response = await fetch(SERVER_URL, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"X-Client-Id": "pi",
+				...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
+			},
+			body: JSON.stringify({ ...baseBody, max_tokens: BASE_MAX_TOKENS * attempt }),
+			signal: signal ?? AbortSignal.timeout(300_000),
+		});
 
-	if (!response.ok) {
-		const error = await response.text().catch(() => "");
-		throw new Error(`VLM server ${response.status}: ${error.slice(0, 300)}`);
+		if (!response.ok) {
+			const error = await response.text().catch(() => "");
+			throw new Error(`VLM server ${response.status}: ${error.slice(0, 300)}`);
+		}
+
+		const data = (await response.json()) as {
+			choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>;
+		};
+		const message = data.choices?.[0]?.message;
+		const content = typeof message?.content === "string" ? message.content.trim() : "";
+		lastFinishReason = data.choices?.[0]?.finish_reason ?? "unknown";
+		if (content) return content;
+
+		if (attempt < MAX_ATTEMPTS) {
+			// 잠깐 대기 후 더 큰 예산으로 재시도(서버 캐시 재사용 기대).
+			await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+		}
 	}
 
-	const data = (await response.json()) as {
-		choices?: Array<{ message?: { content?: unknown } }>;
-	};
-	const content = data.choices?.[0]?.message?.content;
-	return typeof content === "string" ? content.trim() : "";
+	throw new Error(
+		`VLM returned empty content after ${MAX_ATTEMPTS} attempts (last finish_reason: ${lastFinishReason}). ` +
+			`이미지가 모델이 해석하기 어려운 렌더링(문자 깨짐 등)일 수 있습니다.`,
+	);
 }
 
 function clamp(value: number): number {
