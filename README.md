@@ -57,8 +57,7 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
   * **3-State Task Status**: Tracks task states (`pending`, `in_progress`, `completed`).
   * **`/todos` Command**: Slash command to inspect active task lists during sessions.
   * **Real-time Terminal UI**: Live progress indicators (`X/Y completed`) in the Pi terminal UI.
-* 🛠️ **`apply_patch.ts` (Multi-file Patching)**: Multi-file Git-style chunk patch tool (`*** Begin Patch ...`). Supports file creation, edits, movement, and deletions in a single tool call.
-* ❓ **`question.ts` (Interactive Prompts)**: Interactive multi-choice and write-in question modal UI.
+* ❓ **`question.ts` (Interactive Prompts)**:  Interactive multi-choice and write-in question modal UI.
 
 ---
 
@@ -94,4 +93,4 @@ No private API keys, IP addresses, or secrets are tracked in this repository. Up
 
 * **[Pi Coding Agent](https://github.com/earendil-works/pi)**: Core terminal coding agent created by Mario Zechner & Earendil Works.
 * **[pi-subagents](https://www.npmjs.com/package/pi-subagents) & [pi-web-access](https://www.npmjs.com/package/pi-web-access)**: Official subagent orchestration and web search extension packages for Pi.
-* **[OpenCode](https://github.com/anomalyco/opencode)**: Original tool concepts and algorithms adapted for Pi extensions (`apply_patch`, `imageread`).
+* **[OpenCode](https://github.com/anomalyco/opencode)**: Original tool concepts and algorithms adapted for Pi extensions (`imageread`).
