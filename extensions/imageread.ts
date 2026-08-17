@@ -4,8 +4,8 @@
  *
  * Ported from the opencode tools setup. The text-only coding
  * models use this tool to inspect screenshots, charts, and other image files.
- * (VLM backend history: oMLX :8080 → Qwen3.6 35B A3B via local :8098;
- *  token stats logged by the token proxy.)
+ * (VLM backend history: oMLX :8080 → Qwen3.6 35B A3B → Qwen3.8 27B (2026-08-17)
+ *  via local :8098; token stats logged by the token proxy.)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -19,7 +19,7 @@ import { Type } from "typebox";
 
 const execFileAsync = promisify(execFile);
 
-// Qwen3.6 같은 reasoning 모델은 chain-of-thought가 max_tokens를 소진하면
+// Qwen3.8 같은 reasoning 모델은 chain-of-thought가 max_tokens를 소진하면
 // content가 빈 채(finish_reason="length")로 끝날 수 있다.
 // 예산을 키워가며 재시도하고, 그래도 빈 응답이면 명시적 에러를 던진다.
 const MAX_ATTEMPTS = 3;
@@ -30,7 +30,7 @@ const SERVER_URL =
 	"http://localhost:8098/v1/chat/completions";
 const MODEL_ID =
 	process.env.IMAGEREAD_VLM_MODEL ??
-	"Qwen3.6 35B A3B";
+	"Qwen3.8 27B";
 const API_KEY = process.env.IMAGEREAD_VLM_API_KEY ?? "";
 
 interface CropRegion {
