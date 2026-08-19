@@ -1,6 +1,6 @@
 # 🛠 bg.ts Architectural Redesign — Implementation Plan
 
-> **Status**: Draft for review · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST)
+> **Status**: Draft v2 (리뷰 반영) · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST) · **Revised**: 2026-08-19 (KST) — 코드 대조 리뷰 반영, 변경 이력 §15
 > **Scope**: `extensions/bg.ts` 전면 redesign (wrapper 스크립트 + `/bg` 커맨드 + `ctrl+q` 정책)
 > **관련 이슈**: tail 고아 누적, 파이프 오염, `pkill` 자기 재귀, 무조건 래핑 오버헤드
 
@@ -31,6 +31,12 @@
 
 **Redesign은 버그 클래스 자체를 제거**한다. 래퍼를 최소화하고, tail을 없애고, opt-in을 슬래시 커맨드로 명시화.
 
+> **📌 2026-08-19 리뷰 결정 (D1)**: 래퍼 **패치 유지(안 a) vs redesign(안 b)** 의결 → **안 b(redesign) 채택**.
+> 근거: 5종 패치라도 60+줄 래퍼 bash·tail·SIGUSR1 race가 남아 유지보수 부담이 크고,
+> mid-execution 전환은 시작 시점 opt-in(`/bg`·`# bg:run`)으로 대체 가능.
+> 단, 리뷰에서 확인된 **에이전트 백그라운딩 경로 소실**(모델은 슬래시 커맨드를 실행할 수 없음)
+>은 `# bg:run` 마커로 복원한다 (G8, §5.1, R1 개정 — 변경 이력 §15 참조).
+
 ---
 
 ## 2. 목표 및 비목표
@@ -46,13 +52,14 @@
 | **G5** | 기존 UX 보존: 완료 자동 주입, `/bglist`, `/bgkill`, 세션별 격리 |
 | **G6** | 기존 `/tmp/pi-bg/<jobid>/` 데이터 하위 호환 |
 | **G7** | `pi -p` 모드 정상 종료 (이벤트 루프 hang 없음) |
+| **G8** | (리뷰 추가) 에이전트가 bash 툴로 자기 긴 명령을 백그라운딩할 수 있음 (`# bg:run` 마커 — 모델은 슬래시 커맨드를 실행할 수 없음) |
 
 ### 2.2 비목표 (Non-Goals)
 
 | ID | 비목표 |
 |---|---|
 | **N1** | 백그라운드 명령의 실시간 TUI 스트리밍 (deferred — 후속 enhancement) |
-| **N2** | `ctrl+q`가 non-`/bg` 명령에 동작 (의도된 동작 변경) |
+| **N2** | `ctrl+q`가 non-`/bg` 명령에 동작 (의도된 동작 변경 — D1: mid-execution 전환은 폐기하고 시작 시점 opt-in으로 대체) |
 | **N3** | `bgnow`의 SIGUSR1 기반 mid-execution 백그라운딩 (deprecated) |
 | **N4** | Windows 네이티브 지원 (Unix 전용 — `setsid`, `process.kill(-pid)` 의존) |
 
@@ -100,11 +107,26 @@
    fs.watch(BG_DIR) → 완료 감지 → pi.sendMessage(auto-inject)
 ```
 
+**에이전트 경로 (리뷰 추가, G8)** — 모델은 슬래시 커맨드를 칠 수 없으므로 bash 명령 내 마커로 opt-in:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ bash tool: "<cmd> # bg:run"  ──→  tool_call 핸들러           │
+│   └─ 마커 제거 후 spawnBackground() 경로로 재작성             │
+│      (실제 실행은 위와 동일한 detached bash — 래퍼 없음)       │
+│      툴 콜은 즉시 "job=<id>" 반환 → 완료 시 자동 주입(§5.5)   │
+└─────────────────────────────────────────────────────────────┘
+```
+
 **핵심 변화**:
 - **래퍼 스크립트 제거** — Extension이 Node.js `spawn`으로 직접 명령 실행
 - **tail 제거** — 로그 스트리밍은 extension의 `fs.watch` + `readFile`로 (필요 시)
-- **opt-in 명시화** — `/bg <cmd>`만 래핑, 나머지는 통과
+- **opt-in 명시화** — 사용자: `/bg <cmd>` · 에이전트: `# bg:run` 마커. 나머지는 통과
 - **`detached: true`** — Node.js가 Unix에서 자동으로 새 process group 생성 (`setsid` 불필요)
+
+> **⚠️ 완료 감지 (리뷰 수정 R-10)**: macOS는 `fs.watch` 즉시 감지, **Linux는 `fs.watch`를
+> 쓰지 않고 5s 폴링 sweep만** 사용한다 (dc79e5e: Linux/Node 22에서 `FSWatcher.unref()` 무효
+> → `pi -p` hang). 위 다이어그램의 `fs.watch`는 macOS 경로임 — Linux 즉시성은 0→≤5s.
 
 
 ---
@@ -117,7 +139,7 @@
 
 ```typescript
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, openSync } from "node:fs";
+import { mkdirSync, writeFileSync, openSync, closeSync } from "node:fs";
 
 const BG_DIR = process.env.PI_BG_DIR?.trim() || "/tmp/pi-bg";
 
@@ -145,11 +167,14 @@ function spawnBackground({ cmd, sessionId, quiet = false }: BgOptions): {
     const logPath = `${jobDir}/log`;
     const logFd = openSync(logPath, "w");
 
-    // 작업 스크립트 — eval + exit code 기록만 (최소)
-    // JSON.stringify로 명령 내 따옴표/줄바꿈 안전 처리
+    // (리뷰 수정 R-4) 명령 임베드 방식: `eval ${JSON.stringify(cmd)}`는 불가 —
+    // bash 이중인쇄 문자열은 JSON 이스케이프를 해석하지 않아 \n 등이 리터럴로
+    // 남고 다중 라인 명령이 깨진다. 대신 Node가 cmd 파일을 평문으로 직접 쓰고
+    // (위 메타데이터 기록), 스크립트는 그 파일을 eval한다.
+    // 스크립트는 eval + exit code 기록만 (최소)
     const jobScript = [
         `set +e`,
-        `eval ${JSON.stringify(cmd)}`,
+        `eval "$(cat ${JSON.stringify(`${jobDir}/cmd`)})"`,
         `C=$?`,
         `echo "$C" > ${JSON.stringify(`${jobDir}/exit`)}`,
         `exit $C`,
@@ -161,6 +186,9 @@ function spawnBackground({ cmd, sessionId, quiet = false }: BgOptions): {
         stdio: ["ignore", logFd, logFd],
     });
     child.unref();
+    // (리뷰 수정 R-5) 부모의 logFd 즉시 close — 안 닫으면 job 수만큼
+    // pi 프로세스 fd가 영구 점유된다 (자식은 spawn 시 dup된 자체 fd 보유).
+    closeSync(logFd);
 
     writeFileSync(`${jobDir}/jobpid`, String(child.pid));
     writeFileSync(`${jobDir}/pid`, String(child.pid)); // backward-compat
@@ -202,16 +230,38 @@ pi.registerCommand("bg", {
 });
 ```
 
-**`tool_call` 핸들러 변경**:
+> (Phase 1에서는 위 커맨드를 `"bgrun"` 이름으로 등록 — 기존 `/bg [id]`와 이름 충돌,
+> §7 Phase 1 · 변경 이력 R-3. Phase 2에서 `/bg`로 승격.)
+
+**`tool_call` 핸들러 변경 (리뷰 수정 R-1 — G8)**:
+
+모델은 슬래시 커맨드를 실행할 수 없으므로, 에이전트용 opt-in은 bash 명령 내
+`# bg:run` 마커로 제공한다. 마커가 있는 명령만 `spawnBackground()` 경로로
+재작성하고, 나머지는 **통과(래핑 없음 — G4 유지)** 한다.
 
 ```typescript
-// 이전: 모든 bash 명령을 wrapCommand()로 래핑
-// 이후: 래핑 안 함 — 통과시킴
+const BG_RUN_MARKER = "# bg:run";
+
 pi.on("tool_call", (event, ctx) => {
-    // 의도적으로 비워둠. /bg로 시작된 명령만 래핑됨.
-    // (향후 opt-out 마커가 필요한 경우 여기에 추가)
+    if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
+    const cmd = event.input.command;
+    if (!cmd.includes(BG_RUN_MARKER)) return; // 기본: 무래핑 통과 (G4)
+    const quiet = cmd.includes(QUIET_MARKER);
+    const cleaned = cmd.split(BG_RUN_MARKER).join("").split(QUIET_MARKER).join("").trim();
+    if (!cleaned) return;
+    const { jobId } = spawnBackground({
+        cmd: cleaned,
+        sessionId: ctx.sessionManager.getSessionId(),
+        quiet,
+    });
+    // 툴 콜은 즉시 "백그라운딩 완료"로 끝남 — 실제 작업은 detached bash가 수행
+    event.input.command = `echo "[bg] moved to background job=${jobId} (완료 시 자동 통지됩니다)"`;
 });
 ```
+
+**동작**: 모델이 `bash: "npm install # bg:run"`를 호출하면 툴 콜은 즉시 job id와
+함께 반환되고, 작업은 백그라운드에서 돌며 완료 시 기존 자동 주입(§5.5)으로 결과가
+에이전트 큐에 돌아온다 — **사용자 개입 0회**의 폐루프 (D1 결정의 핵심).
 
 ### 5.2 `ctrl+q` 동작 변경
 
@@ -268,25 +318,28 @@ pi.registerShortcut("ctrl+q", {
 ```typescript
 function killJob(j: JobInfo): boolean {
     if (!isAlive(j.jobPid)) return false;
-    try {
-        // detached:true로 spawn된 작업은 자체 PGID 리더
-        // → -PID로 그룹 단위 종료 (자식 프로세스 포함)
-        process.kill(-j.jobPid, "SIGTERM");
-    } catch (e) {
-        // PGID 킬 실패 시 개별 PID로 폴백
-        try {
-            process.kill(j.jobPid, "SIGTERM");
-        } catch {
-            return false;
-        }
+    // (리뷰 수정 R-8) 폴백 순서: 신규 job은 -jobPid(PGID) → 전환기 구 형식 job은
+    // PGID 리더가 wrapper이므로 -wrapperPid → 마지막에 개별 PID.
+    const groupKills = [
+        () => process.kill(-j.jobPid, "SIGTERM"),      // 신규: detached bash = PGID 리더
+        () => process.kill(-j.wrapperPid, "SIGTERM"),  // 구 형식: wrapper = PGID 리더
+        () => process.kill(j.jobPid, "SIGTERM"),       // 개별 폴백
+    ];
+    let delivered = false;
+    for (const kill of groupKills) {
+        try { kill(); delivered = true; break; } catch { /* 다음 폴백 */ }
     }
+    if (!delivered) return false;
     // 2초 후에도 살아있으면 SIGKILL
+    // (리뷰 수정 R-9) .unref() — pi -p(원샷)에서 이 타이머만으로 프로세스가
+    // 2s 더 살지 않게 (G7 유지). 단, 호스트가 실제로 먼저 종료하면 에스컬레이션은
+    // 수행되지 않는다 — SIGTERM만 전달된 상태로 남음 (허용, 문서화).
     setTimeout(() => {
         if (isAlive(j.jobPid)) {
             try { process.kill(-j.jobPid, "SIGKILL"); }
             catch { try { process.kill(j.jobPid, "SIGKILL"); } catch {} }
         }
-    }, 2000);
+    }, 2000).unref();
     return true;
 }
 ```
@@ -334,11 +387,14 @@ esac
 
 **권장**: 옵션 B (하위 호환 + 새 기능). 기존 사용자가 `bgnow <pid>`를 호출하면 deprecation 경고 후 status로 폴백.
 
-### 5.8 `# bg:off` / `# bg:on` 마커 — 제거
+### 5.8 마커 정리 (리뷰 수정 R-1)
 
-- `# bg:off`: 무조건 래핑이 없어졌으므로 무의미. **제거**.
-- `# bg:on`: opt-in이 슬래시 커맨드로 명시화되었으므로 무의미. **제거**.
-- `# bg:quiet`: 유지 (통지 억제 용도로 여전히 유용).
+| 마커 | 이전 | 이후 |
+|---|---|---|
+| `# bg:off` | 래핑 opt-out | **제거** — 무조건 래핑이 없어져 무의미 |
+| `# bg:on` | (없음) | **`# bg:run`으로 대체** — 에이전트용 opt-in (§5.1, G8) |
+| `# bg:run` | (신규) | **추가** — bash 명령에 포함 시 `spawnBackground()` 경로로 재작성 |
+| `# bg:quiet` | 통지 억제 | **유지** — `/bg`·`# bg:run` 명령 모두에서 동작 |
 
 ### 5.9 환경 변수 정리
 
@@ -348,6 +404,7 @@ esac
 | `PI_BG_SWEEP_MS` | 유지 | 유지 (폴링 간격, 기본 5000) |
 | `PI_BG_DEBOUNCE_MS` | 유지 | 유지 (배치 디바운스, 기본 1500) |
 | `PI_BG_STALE_MS` | (없음, 하드코딩 24h) | 신규 — STALE_MS 오버라이드 |
+| `PI_BG_OPT_IN` | (없음) | 신규 — opt-in 모드 플래그 (`1` = Phase 2 동작). (리뷰 수정 R-11: settings.json `bg.useOptIn` 대신 env var — extension은 현재 env var만 읽고 `PI_BG_*` 패턴 통일) |
 
 ---
 
@@ -359,15 +416,18 @@ esac
 |---|---|---|---|
 | `pid` | PID | 래퍼 PID | 작업 bash PID (= jobpid) |
 | `jobpid` | 작업 PID | 작업 PID | 작업 bash PID |
-| `cmd` | 원본 명령 | base64 | 평문 (Node.js spawn이 안전 처리) |
-| `session` | Pi 세션 ID | base64 | 평문 |
+| `cmd` | 원본 명령 | 평문 (래퍼가 base64 디코드 후 기록) | 평문 (Node가 직접 기록 — 변경 없음) |
+| `session` | Pi 세션 ID | 평문 (래퍼가 base64 디코드 후 기록) | 평문 (Node가 직접 기록 — 변경 없음) |
 | `log` | stdout+stderr | wrapper가 작성 | Node.js가 직접 작성 |
 | `exit` | 종료 코드 | 작업이 작성 | 작업이 작성 (변경 없음) |
 | `backgrounded` | 백그라운드 마커 | ctrl+q 시 작성 | 항상 존재 |
 | `notified` | 통지 마커 | extension이 작성 | (변경 없음) |
 | `quiet` | 통지 억제 | (조건부) | (조건부, 변경 없음) |
 
-**하위 호환**: 기존 작업의 `cmd`/`session`이 base64 형식이어도 `readFile`로 읽고 base64 디코드 시도, 실패 시 평문으로 폴백.
+**하위 호환 (리뷰 수정 R-7)**: 현행 래퍼는 `cmd`/`session`을 base64 **디코드 후 평문**으로
+기록하므로 디코드 폴백은 불필요하다. 실제 전환기 호환 문제는 **`pid` 파일 의미**
+(구=wrapper PID, 신=job bash PID)뿐 — `killJob`의 `-wrapperPid` 폴백(§5.4)이 이를
+커버하고, `STALE_MS` 후 구 job은 자동 정리된다.
 
 
 ---
@@ -379,26 +439,33 @@ esac
 **목표**: 기존 동작 유지하면서 `/bg` 경로 추가
 
 **변경사항**:
-1. `extensions/bg.ts`에 `spawnBackground()` + `/bg` 핸들러 추가
-2. 기존 `wrapCommand()` + `tool_call` 핸들러는 **그대로 유지**
-3. `settings.json.example`에 `"bg": { "useOptIn": false }` 추가 (기본: 기존 동작)
-4. README에 `/bg` 사용법 추가 (기존 ctrl+q 동작은 유지)
+1. `extensions/bg.ts`에 `spawnBackground()` 추가
+2. **신규 사용자 커맨드는 `/bgrun <cmd>`로 등록** (리뷰 수정 R-3: 기존 `/bg [id]`=실행 중 작업 전환과
+   이름 충돌 — 같은 이름에 두 의미를 `registerCommand`로 등록할 수 없음. Phase 2에서 `/bg`로 승격)
+3. `# bg:run` 마커 처리 추가 (§5.1) — 기존 무조건 래핑과 공존하므로, 마커 명령만
+   래핑에서 제외하고 `spawnBackground()`로 재작성
+4. 기존 `wrapCommand()` + `tool_call` 핸들러는 나머지 명령에 대해 **그대로 유지**
+5. `PI_BG_OPT_IN` env var 문서화 (리뷰 수정 R-11, settings.json 플래그 대신)
+6. README에 `/bgrun`·`# bg:run` 사용법 추가 (기존 ctrl+q 동작은 유지)
 
 **검증 항목**:
-- [ ] `/bg sleep 5 && echo done` → 즉시 반환, 5초 후 자동 통지
-- [ ] 기존 ctrl+q 동작 그대로 (모든 bash 명령 백그라운드 전환)
+- [ ] `/bgrun sleep 5 && echo done` → 즉시 반환, 5초 후 자동 통지
+- [ ] `bash: "sleep 5 && echo done # bg:run"` (에이전트) → 툴 콜 즉시 반환 + 완료 자동 통지
+- [ ] 기존 ctrl+q 동작 그대로 (마커 없는 bash 명령 백그라운드 전환)
 - [ ] `pi -p` 모드 정상 종료
 
 ### Phase 2: 기본값 전환 (Phase 1 검증 후)
 
-**목표**: `useOptIn: true`가 기본값. 무조건 래핑 제거.
+**목표**: `PI_BG_OPT_IN=1` 동작이 기본값. 무조건 래핑 제거.
 
 **변경사항**:
-1. `settings.json.example`의 `"bg.useOptIn": true`로 변경
-2. `tool_call` 핸들러에서 `wrapCommand()` 호출 제거 (단, `wrapCommand` 함수는 export 유지 — 롤백용)
-3. `ctrl+q` 핸들러를 §5.2의 "상태 표시" 버전으로 교체
-4. README에서 ctrl+q의 "백그라운드 전환" 설명을 "상태 표시"로 변경
-5. `bgCommandsRegistered` 조건부 등록 로직 제거
+1. `PI_BG_OPT_IN=1`이 기본 동작으로 전환 (env var — R-11)
+2. `tool_call` 핸들러에서 `wrapCommand()` 호출 제거 — `# bg:run` 마커 명령만
+   `spawnBackground()`로 재작성, 나머지는 통과 (단, `wrapCommand` 함수는 export 유지 — 롤백용)
+3. `/bgrun`을 `/bg`로 승격 (구 `/bg [id]` 전환 의미 제거)
+4. `ctrl+q` 핸들러를 §5.2의 "상태 표시" 버전으로 교체
+5. README에서 ctrl+q의 "백그라운드 전환" 설명을 "상태 표시"로 변경
+6. `bgCommandsRegistered` 조건부 등록 로직 제거
 
 **검증 항목**:
 - [ ] Phase 1의 모든 검증 항목
@@ -412,7 +479,7 @@ esac
 
 **변경사항**:
 1. `wrapCommand()` 함수 완전 제거
-2. `# bg:off` / `# bg:on` 마커 처리 코드 제거
+2. `# bg:off` 마커 처리 코드 제거 (`# bg:run`/`# bg:quiet`는 유지)
 3. `bgnow`를 §5.7 옵션 B로 재작성
 4. `install.sh`에서 `bgnow` 설치 부분 유지 (재작성된 버전)
 5. README의 "Notes" 섹션에서 `# bg:off` 언급 제거
@@ -458,12 +525,16 @@ test("# bg:quiet suppresses notification", async () => {
 });
 ```
 
-### 8.2 회귀 테스트 (`tests/bg-regression.test.mjs` 기존)
+### 8.2 회귀 테스트 (`tests/bg-regression.test.mjs` 기존) (리뷰 수정 R-6)
 
-기존 테스트가 **그대로 통과**해야 함 (하위 호환 검증):
-- `wrapCommand()` 제거 후에도 기존 export (`sweep`) 동작
-- `/tmp/pi-bg/<jobid>/` 디렉토리 스캔 로직 변경 없음
-- 완료 자동 주입 (`flushNotices`) 변경 없음
+기존 테스트는 **래핑 + ctrl+q SIGUSR1 플로우를 직접 검증**하므로 Phase 2/3에서는
+**그대로 통과할 수 없다** — 페이즈별 처리:
+
+| 페이즈 | 기존 테스트 처리 |
+|---|---|
+| Phase 1 | 그대로 통과해야 함 (구 경로 유지 — 마커 명령 제외 로직만 추가) |
+| Phase 2 | 래핑/SIGUSR1 의존 케이스(`backgroundAndFinish` 등)는 **폐기 표시** 후 `bg-redesign.test.mjs`의 동등 케이스로 대체. 유지되는 불변 검증: `sweep` export, `/tmp/pi-bg/<jobid>/` 스캔, 완료 자동 주입(`flushNotices`) 1회 보장, 세션 스코핑 |
+| Phase 3 | 폐기된 케이스 물리 삭제 |
 
 ### 8.3 통합 테스트 (수동 체크리스트)
 
@@ -478,6 +549,8 @@ test("# bg:quiet suppresses notification", async () => {
 | `/bgkill <id>` (이미 완료) | "이미 종료되었습니다" 경고 |
 | `ctrl+q` (작업 없음) | "백그라운드 작업 없음. /bg 로 실행하세요" 안내 |
 | `ctrl+q` (작업 실행 중) | 상태 표시 (pid + 마지막 로그 10줄) |
+| `bash: "sleep 3 && echo done # bg:run"` (에이전트, G8) | 툴 콜 즉시 반환(job id 포함), 3초 후 자동 통지 |
+| `bash: "printf 'a\\nb' # bg:run"` (다중 라인 명령 — R-4) | 2줄 모두 로그에 정상 기록 (cmd 파일 eval 방식 검증) |
 | `pi -p "/bg sleep 100"` | 명령은 백그라운드, pi -p는 다른 작업 계속 |
 | `pi -p` (백그라운드 작업 없음) | 정상 종료 (이벤트 루프 hang 없음) |
 | `pkill -f 'tail.*pi-bg'` | 무해 (tail 자체가 없음) |
@@ -493,7 +566,7 @@ test("# bg:quiet suppresses notification", async () => {
 
 | 단계 | 롤백 방법 |
 |---|---|
-| Phase 1 | `settings.json`에서 `"bg.useOptIn": false` 설정 → 기존 무조건 래핑 복귀 |
+| Phase 1 | `PI_BG_OPT_IN` 미설정(=0) → 기존 무조건 래핑 복귀 |
 | Phase 2 | `wrapCommand` 함수 export 유지 → 일시적으로 `tool_call` 핸들러에 복원 |
 | Phase 3 | git revert로 커밋 단위 롤백 |
 
@@ -536,6 +609,8 @@ test("# bg:quiet suppresses notification", async () => {
   * **`ctrl+q`** — shows status of running `/bg` jobs (was: mid-execution backgrounding).
     For commands not started with `/bg`, shows a hint to use `/bg` instead.
   * **`# bg:quiet`** — append to a `/bg` command to suppress the completion notification.
+  * **`# bg:run`** (agent path) — the model appends this marker to a bash command to
+    background it; the tool call returns immediately and completion is auto-injected.
 ```
 
 ---
@@ -544,7 +619,7 @@ test("# bg:quiet suppresses notification", async () => {
 
 | 리스크 | 영향 | 완화 전략 |
 |---|---|---|
-| **R1**: 모델이 `/bg`를 깜빡하고 긴 명령 실행 | 백그라운드 안 됨 → 응답 지연 | 시스템 프롬프트에 `/bg` 사용 가이드 추가; 시간 휴리스틱(예: 10s 이상) 자동 opt-in (Phase 4) |
+| **R1**: 모델이 `# bg:run`을 깜빡하고 긴 명령 실행 (리뷰 개정 — 원 안의 "시스템 프롬프트에 `/bg` 가이드"는 모델이 슬래시 커맨드를 실행할 수 없어 무효) | 백그라운드 안 됨 → 응답 지연 | ① `# bg:run`은 bash 명령의 일부이므로 모델이 사용 가능 (G8) ② 시스템 프롬프트에 "10초 이상 걸릴 명령에는 `# bg:run`을 붙여라" 가이드 주입 (Q3) ③ 시간 휴리스틱 자동 opt-in은 Phase 4 후보 |
 | **R2**: `detached: true`의 플랫폼 차이 | Windows에서 PGID 미생성 → 그룹 킬 실패 | N4로 Unix 전용 명시; Windows 사용자에게 WSL/Unix 안내 |
 | **R3**: 기존 `/tmp/pi-bg/` 작업 (구 래퍼) | 신규 코드가 인식 못함 | `cmd`/`session` 읽을 때 base64 시도 + 평문 폴백; STALE_MS 후 자동 정리 |
 | **R4**: `ctrl+q` 동작 변경에 대한 사용자 저항 | UX 회귀 체감 | README/릴리스 노트에 명확히 공지; Phase 1에서 두 동작 병렬 노출로 검증 기간 확보 |
@@ -557,8 +632,8 @@ test("# bg:quiet suppresses notification", async () => {
 | # | 질문 | 제안 기본값 |
 |---|---|---|
 | Q1 | `bgnow` 제거 vs 재작성? | 재작성 (옵션 B) |
-| Q2 | `settings.json`에 `bg.useOptIn` 플래그 추가? | Phase 1에서만, Phase 3에서 제거 |
-| Q3 | 시스템 프롬프트에 `/bg` 가이드 자동 주입? | `before_agent_start` 훅으로 1줄 추가 |
+| Q2 | `PI_BG_OPT_IN` env var 사용? (리뷰 개정 R-11: settings.json 플래그 대신) | Phase 1/2에서만, Phase 3에서 제거(상시 opt-in) |
+| Q3 | 시스템 프롬프트에 `# bg:run` 가이드 자동 주입? (리뷰 개정: `/bg`→`# bg:run`) | `before_agent_start` 훅으로 1줄 추가 — bash 툴로 실행되므로 유효 |
 | Q4 | Phase 4 (스트리밍 widget) 언제? | 별도 RFC, 이번 redesign과 분리 |
 
 ---
@@ -568,7 +643,8 @@ test("# bg:quiet suppresses notification", async () => {
 | 단계 | 설명 | 추정 |
 |---|---|---|
 | **1** | `spawnBackground()` 함수 작성 + 타입 정의 | 1h |
-| **2** | `/bg` 슬래시 커맨드 핸들러 작성 | 0.5h |
+| **2** | `/bgrun` 슬래시 커맨드 핸들러 작성 (Phase 2에서 `/bg` 승격) | 0.5h |
+| **2b** | (리뷰 추가) `# bg:run` 마커 tool_call 재작성 로직 | 0.5h |
 | **3** | `killJob()` PGID 기반으로 교체 | 0.5h |
 | **4** | `ctrl+q` 핸들러를 "상태 표시" 버전으로 교체 | 0.5h |
 | **5** | `bgCommandsRegistered` 조건부 등록 로직 제거 | 0.5h |
@@ -582,7 +658,7 @@ test("# bg:quiet suppresses notification", async () => {
 | **13** | Phase 2 기본값 전환 | 0.5h |
 | **14** | Phase 2 모니터링 (3일) | — |
 | **15** | Phase 3 정리 (deprecated 코드 제거) | 0.5h |
-| **총** | | **~8.5h + 1.5주 모니터링** |
+| **총** | | **~9h + 1.5주 모니터링** |
 
 ---
 
@@ -611,3 +687,24 @@ test("# bg:quiet suppresses notification", async () => {
 - [ ] **테스트 통과 확인**: §8 체크리스트 완료 후 Phase 2 진행
 
 **리뷰 후 수정 사항은 본 문서에 직접 반영 (체크박스 + 변경 이력 섹션 추가)**.
+
+---
+
+## 15. 변경 이력 — 2026-08-19 코드 대조 리뷰 반영
+
+`extensions/bg.ts`(604줄)·`tests/bg-regression.test.mjs`·`scripts/bgnow`·`install.sh`와
+대조한 리뷰 결과 반영. 각 항목의 **수정 이유**를 함께 기록한다.
+
+| ID | 위치 | 수정 내용 | 수정 이유 (리뷰 근거) |
+|---|---|---|---|
+| **D1** | §1.2, §2 | 래퍼 패치(안 a) vs redesign(안 b) 의결 → **안 b 채택** + 에이전트 경로는 마커로 복원 | 5종 패치라도 60+줄 래퍼·tail·SIGUSR1 race가 남아 유지보수 부담이 크고, mid-execution 전환은 시작 시점 opt-in으로 대체 가능. 다만 redesign이 에이전트 백그라운딩 경로를 소실시키므로 G8으로 복원 |
+| **R-1** | §4, §5.1, §5.8, §11(R1/Q3) | `# bg:run` 마커 추가 (G8) | **결정적 문제**: 모델은 슬래시 커맨드를 실행할 수 없어 `/bg`만으로는 에이전트가 자기 긴 명령을 백그라운딩할 수 없음 → 긴 명령 시나리오에서 ①턴 블로킹 ②완료 자동 통지 두 가지 모두 소실. 원 안의 R1 완화("시스템 프롬프트에 `/bg` 가이드")는 구조적으로 무효. 마커는 bash 명령의 일부이므로 모델이 사용 가능하고 기본 무래핑(G4)도 유지 |
+| **R-3** | §7 Phase 1/2 | Phase 1 신규 커맨드를 `/bgrun`으로 분리, Phase 2에서 `/bg` 승격 | 기존 `/bg [id]`(실행 중 작업 전환)와 이름 충돌 — 같은 이름에 두 의미를 `registerCommand`로 등록할 수 없어 Phase 1 병렬 배포가 불가했던 blocker |
+| **R-4** | §5.1 | 명령 임베드를 `eval ${JSON.stringify(cmd)}` → **cmd 파일 기록 + `eval "$(cat ...)"`** | bash 이중인쇄 문자열은 JSON 이스케이프를 해석하지 않아 `\n`이 리터럴로 남고 다중 라인 명령이 깨짐. 원 안의 "JSON.stringify로 줄바꿈 안전 처리" 주장은 오해 |
+| **R-5** | §5.1 | spawn 후 `closeSync(logFd)` 추가 | 부모가 log fd를 닫지 않으면 job 수만큼 pi 프로세스 fd가 영구 점유 (fd 누출) |
+| **R-6** | §8.2 | "기존 테스트가 그대로 통과" → 페이즈별 폐기/대체 표 | 기존 회귀 테스트가 래핑+SIGUSR1 플로우를 직접 검증하므로 Phase 2/3에서 그대로 통과는 불가능 — 원 안의 자기 모순 |
+| **R-7** | §6 | "cmd/session 이전: base64" → "평문(래퍼가 디코드 후 기록)" 정정, base64 마이그레이션 제거 | 현행 래퍼 코드가 base64를 디코드한 뒤 평문으로 기록함을 확인 — 마이그레이션 로직 불필요. 실제 전환기 이슈는 `pid` 파일 의미 변화뿐 |
+| **R-8** | §5.4 | `killJob` 폴백 순서 `-jobPid` → `-wrapperPid` → `jobPid` | 전환기에 실행 중인 **구 형식 job**의 PGID 리더는 wrapper이므로 `-jobPid`만으로는 그룹 킬 불가 (ESRCH → 개별 PID 폴백으로 자식 프로세스 생존) |
+| **R-9** | §5.4 | SIGKILL 에스컬레이션 `setTimeout().unref()` | `pi -p`(원샷)에서 kill 호출 시 타이머만으로 프로세스가 2s 더 생존 — G7 회귀. (호스트가 먼저 종료하면 에스컬레이션 미수행은 허용, 문서화) |
+| **R-10** | §4 | 완료 감지의 Linux 폴링 전용 명시 | dc79e5e: Linux/Node 22에서 `FSWatcher.unref()` 무효 → Linux는 `fs.watch` 미사용. 다이어그램의 `fs.watch`만 보고 구현하면 G7 회귀 |
+| **R-11** | §5.9, §7 | settings.json `bg.useOptIn` → `PI_BG_OPT_IN` env var | extension은 현재 env var(`PI_BG_*`)만 읽고 settings 읽기 메커니즘이 없음 — 기존 패턴 통일, 미기재 의존 제거 |
