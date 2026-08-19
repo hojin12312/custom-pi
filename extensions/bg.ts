@@ -491,15 +491,14 @@ function hasInterest(sessionId: string): boolean {
 function ensureSweeper(pi: ExtensionAPI, sessionId: string): void {
 	if (sweepTimer) return;
 	sweepTimer = setInterval(() => {
-		if (!hasInterest(ownerSessionId)) {
-			if (sweepTimer) {
-				clearInterval(sweepTimer);
-				sweepTimer = null;
-			}
-			return;
-		}
-		sweep(pi, ownerSessionId);
+		// 폴링 감지는 세션 내내 유지(unref)한다 — Linux처럼 fs.watch를 못 쓰는 환경에서도
+		// 새 bg 작업 시작·완료를 감지하게 하기 위함(비용은 5s마다 readdir(/tmp/pi-bg)뿐).
+		if (hasInterest(ownerSessionId)) sweep(pi, ownerSessionId);
 	}, SWEEP_MS);
+	// unref: 이 interval만으로 프로세스가 살아있지 않게 한다.
+	// pi -p(원샷)에서 이 타이머가 루프를 붙잡아 종료를 막던 hang 수정 (2026-08-15).
+	// interactive TUI는 stdin 등 다른 핸들이 루프를 유지하므로 정상 동작한다.
+	sweepTimer.unref();
 }
 
 // 완료 감시 시작 — fs.watch(재귀) + 관심 job 있을 때만 폴백 interval.
@@ -510,9 +509,13 @@ function startWatcher(pi: ExtensionAPI, sessionId: string): void {
 	ensureSweeper(pi, sessionId);
 	if (watcherStarted) return;
 	watcherStarted = true;
+	// ⚠️ Linux(Node)는 FSWatcher.unref()가 이벤트 루프를 해제하지 못해 pi -p(원샷) 종료를 막는다
+	// (2026-08-15 실측: Node 22 Linux에서 fs.watch().unref() 무효 → 프로세스가 살아남).
+	// Linux는 fs.watch를 쓰지 않고 위 폴링 sweep(5s, unref)이 감지를 대신한다 — 즉시성만 0→5s.
+	if (process.platform === "linux") return;
 	try {
 		mkdirSync(BG_DIR, { recursive: true });
-		watch(BG_DIR, { recursive: true }, () => {
+		const watcher = watch(BG_DIR, { recursive: true }, () => {
 			const sid = ownerSessionId;
 			if (!sid) return;
 			sweep(pi, sid);
@@ -520,6 +523,10 @@ function startWatcher(pi: ExtensionAPI, sessionId: string): void {
 		}).on("error", (err) => {
 			console.error("[bg] watcher error:", (err as Error)?.message ?? err);
 		});
+		// unref: FSWatcher만으로 프로세스를 살려두지 않게 한다.
+		// pi -p(원샷)에서 fs.watch가 루프를 붙잡아 종료를 막던 hang 수정 (2026-08-15).
+		// interactive TUI는 stdin 등이 루프를 유지하므로 이벤트 감지는 그대로 동작한다.
+		watcher.unref();
 	} catch (err) {
 		console.error("[bg] watcher start failed:", (err as Error)?.message ?? err);
 	}
