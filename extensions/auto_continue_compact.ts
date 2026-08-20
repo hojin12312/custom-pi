@@ -11,9 +11,14 @@ import type { ExtensionAPI, SessionCompactEvent } from "@earendil-works/pi-codin
 export default function autoContinueCompactExtension(pi: ExtensionAPI) {
     let pendingDecision = false;
 
-    pi.on("session_compact", async (event: SessionCompactEvent) => {
+    pi.on("session_compact", async (event: SessionCompactEvent, ctx) => {
         // Avoid duplicate triggers if already in decision flow
         if (pendingDecision) return;
+
+        // If the user already queued their own message, it will drive the
+        // next turn — skip the auto decision prompt so it doesn't jump ahead
+        // of (or pile onto) what the user already queued.
+        if (ctx.hasPendingMessages()) return;
 
         pendingDecision = true;
 
@@ -30,11 +35,16 @@ export default function autoContinueCompactExtension(pi: ExtensionAPI) {
         pi.sendUserMessage(decisionPrompt, { deliverAs: "followUp" });
     });
 
-    pi.on("agent_end", async (event) => {
+    pi.on("agent_end", async (event, ctx) => {
         if (!pendingDecision) return;
 
         // Reset flag for decision gate
         pendingDecision = false;
+
+        // Same guard as above: if the user queued a message while the
+        // decision prompt was running, defer to that instead of injecting
+        // our own resume prompt.
+        if (ctx.hasPendingMessages()) return;
 
         // Extract last assistant message text
         const messages = event.messages || [];
