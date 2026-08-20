@@ -1,6 +1,6 @@
 # 🧊 Stream Idle-Timeout Patch (local patch, pi-agent-core)
 
-> **Status**: Applied to Mac Studio + MacBook Pro + PICS/simlab (all three, 2026-08-20) · Real-usage verification pending · Upstream PR decision pending
+> **Status**: Applied to Mac Studio + MacBook Pro + PICS/simlab (all three, 2026-08-20) · Fleet startup policy: **600s** (2026-08-20) · Real-usage verification pending · Upstream PR decision pending
 > **Versions**: `@earendil-works/pi-agent-core` 0.84.2 (bundled inside `@earendil-works/pi-coding-agent` 0.84.2)
 > **Upstream repo**: [earendil-works/pi](https://github.com/earendil-works/pi)
 
@@ -113,12 +113,12 @@ Full diff: [`patches/agent-loop.stream-idle-timeout.patch`](../patches/agent-loo
   session that was hung when this was written was left untouched (user
   chose diagnosis-only) and is still running the pre-patch code.
 - **Config**: `PI_STREAM_IDLE_TIMEOUT_MS` (default `180000`) — minimum
-  clamped to `5000`. 180s was chosen as a generous margin above observed
-  legitimate single-turn durations on PICS (622s total turn time was normal;
-  this is a *per-chunk idle* timeout, not a total-duration timeout, so it
-  should not fire during a slow-but-actively-streaming response — only
-  during a true stall). Raise it via env if a provider is known to have long
-  legitimate gaps between chunks.
+  clamped to `5000`. The fleet startup policy exports **`600000` (10 min)**.
+  On 2026-08-20 PICS measured 159,313-token cold prefill at 331.4s; linear
+  extrapolation puts 200K at about 417s before request/throughput variance,
+  so 600s preserves a useful safety margin while retaining the true-stall
+  circuit breaker. This is a *per-event idle* timeout, not a total-duration
+  timeout. It must be present when `pi` starts; `/reload` cannot change it.
 
 ### Reapply after a package update (npm/homebrew reinstall overwrites the file)
 
