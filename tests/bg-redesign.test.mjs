@@ -1,11 +1,12 @@
 /**
- * bg-redesign.test.mjs — Phase 1 (docs/BG-REDESIGN-PLAN.md) 신규 경로 검증
+ * bg-redesign.test.mjs — bg.ts redesign 최종형 (Phase 2+3, docs/BG-REDESIGN-PLAN.md) 검증
  *
  *  - `# bg:run` 마커 (에이전트 경로, G8): tool_call 재작성 → detached bash spawn
- *  - /bgrun (사용자 경로): 무조건 등록, job 생성
+ *  - /bg (사용자 경로, /bgrun 승격): 무조건 등록, job 생성
  *  - PGID 격리 (detached:true), exit code 기록, 다중 라인 명령 (R-4)
- *  - 완료 자동 주입 재사용 (sweep, 세션 스코핑, 1회 보장), # bg:quiet
- *  - Phase 1 병렬 배포: 마커 없는 명령은 기존 래핑 그대로
+ *  - 완료 자동 주입 (sweep, 세션 스코핑, 1회 보장), # bg:quiet
+ *  - 무조건 등록 (/bg·/bglist·/bgkill), ctrl+q 상태 표시, 무래핑 통과 (G4)
+ *  (구 래핑+SIGUSR1 회귀 테스트는 Phase 3에서 물리 삭제 — 동등 검증은 본 파일에 흡수)
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -275,7 +276,7 @@ test("# bg:quiet marker job completes without notification", async () => {
 	}
 });
 
-test("/bgrun command: registered unconditionally, creates job, notifies with details", async () => {
+test("/bg command (promoted from /bgrun): registered unconditionally, creates job, notifies", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-bg-redesign-"));
 	try {
 		const { registerBg } = await importBg(root);
@@ -283,10 +284,12 @@ test("/bgrun command: registered unconditionally, creates job, notifies with det
 		registerBg(harness.pi);
 		const owner = createContext("session-owner");
 
-		// 무조건 등록 (job 없이도)
-		assert.ok(harness.commands.has("bgrun"), "/bgrun must be registered at load");
+		// 항상 등록 (job 없이도 — Phase 2: 조건부 등록 폐기)
+		assert.ok(harness.commands.has("bg"), "/bg must be registered at load");
+		assert.ok(harness.commands.has("bglist"), "/bglist must be registered at load");
+		assert.ok(harness.commands.has("bgkill"), "/bgkill must be registered at load");
 
-		await harness.commands.get("bgrun").handler("sleep 0.2 && echo bgrun-ok", owner.ctx);
+		await harness.commands.get("bg").handler("sleep 0.2 && echo bg-ok", owner.ctx);
 		const notice = owner.notifications.find((n) => n.message.includes("백그라운드 시작"));
 		assert.ok(notice, "start notification");
 		assert.match(notice.message, /job: \d+-\d+-\d+/);
@@ -305,23 +308,19 @@ test("/bgrun command: registered unconditionally, creates job, notifies with det
 				}
 			}
 			return undefined;
-		}, "bgrun job dir");
+		}, "/bg job dir");
 		await waitExit(jobDir, "0");
-		assert.match(await readFile(join(jobDir, "log"), "utf8"), /bgrun-ok/);
-
-		// /bgrun 호출 후 /bglist·/bgkill 등록 (조건부 등록 트리거)
-		assert.ok(harness.commands.has("bglist"));
-		assert.ok(harness.commands.has("bgkill"));
+		assert.match(await readFile(join(jobDir, "log"), "utf8"), /bg-ok/);
 
 		// 빈 인자 → 사용법 안내
-		await harness.commands.get("bgrun").handler("", owner.ctx);
+		await harness.commands.get("bg").handler("", owner.ctx);
 		assert.ok(owner.notifications.some((n) => n.message.includes("사용법")));
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("Phase 1 parallel: command WITHOUT marker is still wrapped (legacy path intact)", async () => {
+test("command WITHOUT marker passes through unwrapped (G4 — no wrapper overhead)", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-bg-redesign-"));
 	try {
 		const { registerBg } = await importBg(root);
@@ -332,16 +331,69 @@ test("Phase 1 parallel: command WITHOUT marker is still wrapped (legacy path int
 
 		const event = {
 			type: "tool_call",
-			toolCallId: "legacy-wrap",
+			toolCallId: "passthrough",
 			toolName: "bash",
-			input: { command: "echo legacy-still-wrapped" },
+			input: { command: "echo plain-command" },
 		};
 		await toolCall(event, owner.ctx);
 
-		// 기존 래퍼 그대로 (tail -f + jobpid 폴링) — Phase 2에서 제거 예정
-		assert.match(event.input.command, /tail -n \+1 -f/);
-		assert.match(event.input.command, /JOBPID/);
-		assert.doesNotMatch(event.input.command, /started in background/);
+		// (Phase 2) 무래핑 통과 — 래퍼(tail -f·JOBPID 폴링) 없음, 원본 그대로
+		assert.equal(event.input.command, "echo plain-command");
+
+		// job dir도 생성되지 않음
+		const entries = await readdir(root);
+		assert.equal(entries.length, 0);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("ctrl+q: status display (no jobs → hint, running job → pid + log tail)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bg-redesign-"));
+	try {
+		const { registerBg } = await importBg(root);
+		const harness = createHarness();
+		registerBg(harness.pi);
+		const toolCall = harness.handlers.get("tool_call")[0];
+		const shortcut = harness.shortcuts.get("ctrl+q");
+		assert.ok(shortcut, "ctrl+q shortcut registered");
+		const owner = createContext("session-owner");
+
+		// 작업 없음 → /bg 안내
+		await shortcut.handler(owner.ctx);
+		assert.match(owner.notifications.at(-1).message, /백그라운드 작업 없음/);
+		assert.match(owner.notifications.at(-1).message, /\/bg/);
+
+		// 실행 중 작업 → pid + 마지막 로그 표시
+		await runViaMarker(toolCall, owner.ctx, "echo ctrlq-visible && sleep 2 # bg:run", root);
+		await waitFor(async () => {
+			const entries = await readdir(root);
+			for (const e of entries) {
+				try {
+					const log = await readFile(join(root, e, "log"), "utf8");
+					if (log.includes("ctrlq-visible")) return true;
+				} catch {
+					/* skip */
+				}
+			}
+			return false;
+		}, "log visible");
+		await shortcut.handler(owner.ctx);
+		const status = owner.notifications.at(-1).message;
+		assert.match(status, /실행 중/);
+		assert.match(status, /pid=\d+/);
+		assert.match(status, /ctrlq-visible/);
+		assert.match(status, /\/bgkill/);
+
+		// 정리: 실행 중 job 종료
+		for (const e of await readdir(root)) {
+			try {
+				const pid = Number((await readFile(join(root, e, "jobpid"), "utf8")).trim());
+				process.kill(-pid, "SIGTERM");
+			} catch {
+				/* skip */
+			}
+		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

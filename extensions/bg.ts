@@ -1,51 +1,39 @@
 /**
- * bg.ts — Bash 백그라운드 전환 확장 (수동 /bg, 완료 자동 주입)
+ * bg.ts — Bash 백그라운드 러너 (redesign 최종형, 2026-08-20)
  *
- * 목적: 긴 bash 작업(다운로드 등)을 백그라운드에 두고, 에이전트와 다른 작업을
- * 계속 진행하기 위함. 자동 백그라운드(예: 10초)는 의도적으로 제외 — 사용자가
- * 명시적으로 /bg 로만 전환한다.
+ * docs/BG-REDESIGN-PLAN.md (v2.1) Phase 1~3 일괄 적용.
  *
  * 동작:
- *  1. 모든 LLM bash 툴 콜을 래퍼로 감싼다. 래퍼는 실제 명령을 서브셸로 실행하되
- *     출력을 /tmp/pi-bg/<jobid>/log 파일로 보내고 tail -f 로 TUI 스트리밍을 유지한다.
- *     (pi의 bash 툴은 원래 stdin이 /dev/null 이므로, 백그라운드 전환으로 인한
- *      stdin 손실은 없음 — spawn 시 stdio[0]="ignore")
- *  2. ctrl+q (단축키) — 실행 중인 (가장 최근) 작업에 SIGUSR1 을 보내 백그라운드 전환.
- *     래퍼는 대기를 풀고 "(bg) moved to background" 를 반환 → 툴 콜이
- *     즉시 끝나 에이전트 턴이 계속 진행된다. 실제 작업은 로그 파일로 계속 실행된다.
- *     ⚠️ 슬래시 커맨드(/bg)는 툴 실행 중 타이핑하면 pi가 입력을 큐잉했다가
- *     툴이 끝난 뒤에 전달하므로 실행 중 전환에는 쓸 수 없다 (2026-08-07 실측).
- *     따라서 실행 중 전환의 주 경로는 ctrl+q 단축키 + 외부 bgnow 스크립트.
- *  3. /bg [id] — 동일 동작의 슬래시 커맨드
- *  4. /bglist   — 작업 상태 목록 (running/done, exit code, cmd 요약, log 경로)
- *  5. /bgkill <id|all> — 작업 프로세스 그룹 종료 (SIGTERM → SIGKILL)
- *     ⚠️ /bg·/bglist·/bgkill 은 실제로 백그라운드된 살아있는 프로세스가 있을 때만
- *     등록·노출된다 (세션 시작 시 잔여 작업, 첫 백그라운드 전환 시점). 미등록 상태에서
- *     타이핑하면 비활성 안내만 한다. pi에 커맨드 언레지스터가 없어 최초 등록 후에는
- *     세션 동안 유지되며, /reload 시 재평가된다.
- *     각 작업에는 소유 Pi session id를 기록하고, 정상 포그라운드 완료 시 임시 기록을
- *     제거한다. ctrl+q/SIGUSR1 전환 때만 backgrounded 표식을 남긴다.
- *  6. 완료 자동 주입 (2026-08-12, [bg notice] 프리픽스 대체):
- *     작업 완료를 fs.watch(BG_DIR, {recursive:true}) + 저빈도 폴백(5s, 관심 job 있을 때만)
- *     으로 감지해, 새 완료(exit 파일 + notified 미기록)를 debounce(1.5s)로 배치한 뒤
- *     pi.sendMessage({customType:'bg-complete', display:true}, {deliverAs:'followUp',
- *     triggerTurn:true})로 에이전트 큐에 주입한다 — idle이면 즉시 턴, 사용자 대기
- *     명령이 있으면 그 뒤로 밀린다. 로그는 데이터일 뿐 지시가 아님을 템플릿에 명시해
- *     프롬프트 인젝션을 방지한다. 소유 세션의 완료만, 1회만 통지(notified 마커).
- *     # bg:quiet: 이 마커가 있는 명령의 완료는 통지 생략.
+ *  1. `/bg <command>` (사용자) — 명령을 백그라운드로 실행하고 즉시 반환.
+ *     extension이 detached bash(자체 PGID)를 직접 spawn — 래퍼 스크립트 없음,
+ *     tail -f 없음 → 고아 tail·파이프 오염·pkill 자기 재귀 버그 클래스 제거.
+ *  2. `# bg:run` 마커 (에이전트, G8) — 모델은 슬래시 커맨드를 실행할 수 없으므로
+ *     bash 명령에 마커를 붙이면 tool_call이 spawnBackground()로 재작성.
+ *     툴 콜은 즉시 반환되고 완료 시 자동 주입으로 결과 통지 (사용자 개입 0회).
+ *     마커 없는 모든 bash 명령은 **통과(무래핑)** — 오버헤드 제로 (G4).
+ *  3. `ctrl+q` (단축키) — 실행 중 `/bg` 작업 상태 표시 (pid + 마지막 로그 10줄).
+ *     (구 "실행 중 포그라운드 명령 백그라운드 전환" 기능은 폐기 — 시작 시점에
+ *      `/bg`·`# bg:run`으로 명시하는 것이 redesign의 방향)
+ *  4. `/bglist` — 작업 상태 목록 (running/done, exit code, cmd 요약, log 경로)
+ *  5. `/bgkill <id|all>` — 작업 프로세스 그룹 종료 (SIGTERM → 2s 후 SIGKILL)
+ *     `/bg`·`/bglist`·`/bgkill`은 항상 등록 (job 진입점이므로 조건부 등록 폐기).
+ *  6. 완료 자동 주입: 작업 완료를 fs.watch(BG_DIR, recursive) + 5s 폴백 sweep
+ *     (Linux는 fs.watch 미사용 — Node 22에서 FSWatcher.unref() 무효, dc79e5e)
+ *     로 감지해 debounce(1.5s) 배치 후 pi.sendMessage({customType:'bg-complete',
+ *     deliverAs:'followUp', triggerTurn:true})로 에이전트 큐에 주입.
+ *     소유 세션의 완료만, 1회만 통지(notified 마커). 로그는 데이터일 뿐
+ *     지시가 아님을 템플릿에 명시 (프롬프트 인젝션 가드).
+ *  7. `# bg:quiet` — 이 마커가 있는 명령의 완료는 통지 생략.
  *
- * Phase 1 (redesign, 2026-08-20 — docs/BG-REDESIGN-PLAN.md):
- *  - /bgrun <cmd> — 사용자 경로. 래퍼/tail 없이 extension이 detached bash(새 PGID)로
- *    직접 spawn. Phase 2에서 /bg로 승격 예정 (구 /bg [id] 전환 의미와 이름 충돌 회피).
- *  - `# bg:run` 마커 — 에이전트 경로(G8). 모델은 슬래시 커맨드를 실행할 수 없으므로
- *    bash 명령에 마커를 붙이면 tool_call이 spawnBackground()로 재작성하고 툴 콜은
- *    즉시 반환. 완료 시 기존 자동 주입으로 결과 통지 (사용자 개입 0회).
- *  - Phase 1은 병렬 배포: 마커 없는 명령은 기존 무조건 래핑+ctrl+q 동작 그대로.
- *    (기본값 전환은 PI_BG_OPT_IN env var, Phase 2)
+ * 데이터: /tmp/pi-bg/<jobid>/ {cmd, session, backgrounded, pid, jobpid, log,
+ *         exit, notified, quiet} — pid 파일은 job bash PID (신 형식; 구 형식
+ *         wrapper PID와의 전환기 호환은 killJob의 -wrapperPid 폴백).
  *
- * opt-out: 에이전트가 특정 명령을 래핑에서 제외하려면 명령 안에 `# bg:off` 포함.
+ * env: PI_BG_DIR(기본 /tmp/pi-bg) · PI_BG_SWEEP_MS(기본 5000) ·
+ *      PI_BG_DEBOUNCE_MS(기본 1500) · PI_BG_STALE_MS(기본 24h)
  *
- * 롤백: 이 파일을 ~/.pi/agent/extensions/ 에서 제거하고 /reload 하면 끝.
+ * 롤백: git revert (Phase 3 이후 구 래퍼 코드는 저장소에서 제거됨).
+ *       긴급 비활성화: 이 파일을 ~/.pi/agent/extensions/ 에서 제거 + /reload.
  *       이미 백그라운드로 보낸 작업은 계속 실행되며(고아), 통지만 끊긴다.
  *       정리: rm -rf /tmp/pi-bg
  */
@@ -56,61 +44,16 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BG_DIR = process.env.PI_BG_DIR?.trim() || "/tmp/pi-bg";
-const BG_OFF_MARKER = "# bg:off";
 const QUIET_MARKER = "# bg:quiet"; // 이 마커가 있는 명령의 완료는 통지 생략
-const BG_RUN_MARKER = "# bg:run"; // (Phase 1, G8) 에이전트용 백그라운딩 opt-in — 래핑 없이 직접 spawn
-const STALE_MS = 24 * 60 * 60 * 1000; // 완료/유실 작업 디렉토리 보존 후 정리
+const BG_RUN_MARKER = "# bg:run"; // 에이전트용 백그라운딩 opt-in — spawnBackground()로 재작성
+const STALE_MS = Math.max(60_000, Number(process.env.PI_BG_STALE_MS ?? 24 * 60 * 60 * 1000)); // 완료/유실 작업 디렉토리 보존 후 정리
 const SWEEP_MS = Math.max(1000, Number(process.env.PI_BG_SWEEP_MS ?? 5000));
 const DEBOUNCE_MS = Math.max(0, Number(process.env.PI_BG_DEBOUNCE_MS ?? 1500)); // 동시 완료 배치 — 완료 N건을 한 메시지로
 
 // ---------------------------------------------------------------------------
-// 래퍼 (bash). 원본 명령은 base64 로 임베드해서 따옴표/줄바꿈 이슈를 회피한다.
-// ---------------------------------------------------------------------------
-function wrapCommand(original: string, sessionId: string, quiet = false): string {
-	const b64 = Buffer.from(original, "utf8").toString("base64");
-	const sessionB64 = Buffer.from(sessionId, "utf8").toString("base64");
-	const quietLine = quiet ? [`printf '1' > "$DIR/quiet"`] : [];
-	return [
-		`set +e`,
-		`JOBID="$$-$(date +%s)"`,
-		`DIR="${BG_DIR}/$JOBID"`,
-		`mkdir -p "$DIR"`,
-		`LOG="$DIR/log"`,
-		`echo "$$" > "$DIR/pid"`,
-		...quietLine,
-		`B64DEC="base64 -D"`,
-		`if printf 'aGk=' | base64 -d >/dev/null 2>&1; then B64DEC="base64 -d"; fi`,
-		`printf '%s' '${b64}' | $B64DEC > "$DIR/cmd" 2>/dev/null`,
-		`printf '%s' '${sessionB64}' | $B64DEC > "$DIR/session" 2>/dev/null`,
-		`BG=0`,
-		`trap 'BG=1; : > "$DIR/backgrounded"' USR1`,
-		`{ eval "$(cat "$DIR/cmd")"; C=$?; echo "$C" > "$DIR/exit"; exit $C; } >"$LOG" 2>&1 &`,
-		`JOBPID=$!`,
-		`echo "$JOBPID" > "$DIR/jobpid"`,
-		`tail -n +1 -f "$LOG" &`,
-		`TAILPID=$!`,
-		`while kill -0 "$JOBPID" 2>/dev/null; do`,
-		`  if [ "$BG" = "1" ] && kill -0 "$JOBPID" 2>/dev/null; then`,
-		`    echo ""`,
-		`    echo "[bg] moved to background job=$JOBID log=$LOG (완료 시 자동 통지됩니다)"`,
-		`    kill "$TAILPID" 2>/dev/null`,
-		`    exit 0`,
-		`  fi`,
-		`  sleep 0.5`,
-		`done`,
-		`kill "$TAILPID" 2>/dev/null`,
-		`wait "$JOBPID" 2>/dev/null`,
-		`CODE=$?`,
-		`echo "[done] exit=$CODE" >&2`,
-		`if [ ! -e "$DIR/backgrounded" ]; then rm -rf "$DIR"; fi`,
-		`exit $CODE`,
-	].join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1 (redesign §5.1): 직접 백그라운딩 — 래퍼/tail 없음.
+// 직접 백그라운딩 (redesign §5.1) — 래퍼/tail 없음.
 // extension이 detached bash(새 PGID)를 spawn하고 로그를 파일로 쓴다.
-// 사용자: /bgrun <cmd> · 에이전트: `# bg:run` 마커. 완료 감지·통지는 기존 sweep/watch 재사용.
+// 사용자: /bg <cmd> · 에이전트: `# bg:run` 마커.
 // ---------------------------------------------------------------------------
 let jobSeq = 0;
 
@@ -125,10 +68,10 @@ function spawnBackground(opts: { cmd: string; sessionId: string; quiet?: boolean
 	const jobDir = join(BG_DIR, jobId);
 	mkdirSync(jobDir, { recursive: true });
 
-	// 메타데이터 — cmd/session은 평문 (R-7: 현행 래퍼도 디코드 후 평문 기록)
+	// 메타데이터 — cmd/session은 평문 (R-7: 이전 래퍼도 디코드 후 평문 기록)
 	writeFileSync(join(jobDir, "cmd"), cmd);
 	writeFileSync(join(jobDir, "session"), sessionId);
-	writeFileSync(join(jobDir, "backgrounded"), "1"); // /bgrun·# bg:run은 항상 backgrounded
+	writeFileSync(join(jobDir, "backgrounded"), "1"); // /bg·# bg:run은 항상 backgrounded
 	if (quiet) writeFileSync(join(jobDir, "quiet"), "1");
 
 	const logPath = join(jobDir, "log");
@@ -136,10 +79,9 @@ function spawnBackground(opts: { cmd: string; sessionId: string; quiet?: boolean
 
 	// (R-4) 명령을 스크립트에 임베드하지 않고 파일로 eval —
 	// bash 이중인쇄 문자열은 JSON 이스케이프(\n 등)를 해석하지 않아 다중 라인 명령이 깨진다.
+	// (서브셸) 명령 자체가 `exit N`을 호출해도 스크립트(부모 bash)는 살아남아
+	// exit 파일을 기록한다. (SIGTERM 등 그룹 킬은 exit 파일 없이 "gone" 상태)
 	// jobDir은 [A-Za-z0-9-]만 포함하므로 단일 인클루드 안전.
-	// (테스트 발견) 명령을 서브셸에서 eval — 명령 자체가 `exit N`을 호출해도
-	// 스크립트(부모 bash)는 살아남아 exit 파일을 기록한다. (SIGTERM 등 그룹 킬은
-	// exit 파일 없이 "gone" 상태 — 구 래퍼와 동일 동작)
 	const jobScript = [
 		"set +e",
 		`( eval "$(cat '${jobDir}/cmd')" )`,
@@ -169,7 +111,7 @@ function spawnBackground(opts: { cmd: string; sessionId: string; quiet?: boolean
 interface JobInfo {
 	id: string;
 	dir: string;
-	wrapperPid: number;
+	wrapperPid: number; // pid 파일 — 신 형식: job bash PID (= jobPid), 구 형식: 래퍼 PID
 	jobPid: number;
 	cmd: string;
 	started: number;
@@ -301,23 +243,37 @@ function scanJobs(): JobInfo[] {
 	return jobs;
 }
 
+// ---------------------------------------------------------------------------
+// 작업 종료 (redesign §5.4) — PGID 기반 그룹 킬
+// ---------------------------------------------------------------------------
 function killJob(j: JobInfo): boolean {
 	if (!isAlive(j.jobPid)) return false;
-	// 래퍼 쉘(그룹 리더)의 프로세스 그룹으로 킬 → 작업 + 자식 전부
-	try {
-		process.kill(-j.wrapperPid, "SIGTERM");
-	} catch {
+	// (R-8) 폴백 순서: 신 형식 job은 -jobPid(PGID) → 전환기 구 형식 job은
+	// PGID 리더가 wrapper이므로 -wrapperPid → 마지막에 개별 PID.
+	const groupKills = [
+		() => process.kill(-j.jobPid, "SIGTERM"), // 신 형식: detached bash = PGID 리더
+		() => process.kill(-j.wrapperPid, "SIGTERM"), // 구 형식: wrapper = PGID 리더
+		() => process.kill(j.jobPid, "SIGTERM"), // 개별 폴백
+	];
+	let delivered = false;
+	for (const kill of groupKills) {
 		try {
-			process.kill(j.jobPid, "SIGTERM");
+			kill();
+			delivered = true;
+			break;
 		} catch {
-			return false;
+			/* 다음 폴백 */
 		}
 	}
-	// 유예 후에도 살아있으면 SIGKILL
+	if (!delivered) return false;
+	// 2초 후에도 살아있으면 SIGKILL
+	// (R-9) .unref() — pi -p(원샷)에서 이 타이머만으로 프로세스가 2s 더 살지 않게 (G7).
+	// 단, 호스트가 실제로 먼저 종료하면 에스컬레이션은 수행되지 않는다 —
+	// SIGTERM만 전달된 상태로 남음 (허용).
 	setTimeout(() => {
 		if (isAlive(j.jobPid)) {
 			try {
-				process.kill(-j.wrapperPid, "SIGKILL");
+				process.kill(-j.jobPid, "SIGKILL");
 			} catch {
 				try {
 					process.kill(j.jobPid, "SIGKILL");
@@ -326,141 +282,15 @@ function killJob(j: JobInfo): boolean {
 				}
 			}
 		}
-	}, 2000);
+	}, 2000).unref();
 	return true;
 }
 
 // ---------------------------------------------------------------------------
-// 백그라운드 전환 공통 로직 (단축키 + /bg 커맨드 공유)
-// ---------------------------------------------------------------------------
-function tryBackground(sessionId: string, arg?: string): { ok: boolean; message: string } {
-	const active = scanJobs().filter(
-		(j) => j.sessionId === sessionId && j.status === "running" && j.wrapperAlive && !j.backgrounded,
-	);
-	if (active.length === 0) {
-		return { ok: false, message: "백그라운드로 보낼 실행 중인 작업이 없습니다" };
-	}
-	let target: JobInfo;
-	if (arg && arg.trim()) {
-		const byId = active.find((j) => j.id === arg.trim());
-		if (!byId) {
-			return { ok: false, message: `작업 ${arg.trim()} 을(를) 찾을 수 없습니다 (실행 중 아님)` };
-		}
-		target = byId;
-	} else {
-		target = active.sort((a, b) => b.started - a.started)[0];
-	}
-	try {
-		process.kill(target.wrapperPid, "SIGUSR1");
-	} catch (e) {
-		return { ok: false, message: `전환 실패: ${(e as Error).message}` };
-	}
-	// 래퍼의 USR1 trap도 같은 표식을 쓰지만, 신호 전달 성공 직후 기록해
-	// 매우 짧은 작업의 종료 race에서도 전환 사실을 보존한다.
-	try {
-		writeFileSync(join(target.dir, "backgrounded"), "1");
-	} catch {
-		/* trap이 표식을 기록하므로 신호 전달 성공 자체는 유지 */
-	}
-	return { ok: true, message: `작업 ${target.id} 를 백그라운드로 전환했습니다 (log: ${target.logPath})` };
-}
-
-// ---------------------------------------------------------------------------
-// 조건부 커맨드 등록
-// 실제로 백그라운드로 전환된 살아있는 프로세스가 있을 때만 /bg 계열을 노출한다.
-// (pi API에 커맨드 언레지스터가 없어, 최초 등록 후에는 세션 동안 유지된다.
-//  메뉴 갱신은 identity autocomplete wrapper로 트리거한다.)
-// ---------------------------------------------------------------------------
-let bgCommandsRegistered = false;
-
-/**
- * "남아있는 bg 프로세스":
- *  - 구 형식: 래퍼가 빠지고(wrapperAlive=false) 작업이 살아있는 상태
- *  - 신 형식(Phase 1): pid 파일이 job bash 자체이므로 wrapperPid === jobpid (살아있음)
- */
-function hasBackgroundedJob(sessionId: string): boolean {
-	return scanJobs().some(
-		(j) =>
-			j.sessionId === sessionId &&
-			j.backgrounded &&
-			j.status === "running" &&
-			(!j.wrapperAlive || j.wrapperPid === j.jobPid),
-	);
-}
-
-interface AutocompleteUi {
-	addAutocompleteProvider(f: (current: unknown) => unknown): void;
-}
-
-function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
-	if (bgCommandsRegistered) return;
-	bgCommandsRegistered = true;
-
-	pi.registerCommand("bg", {
-		description: "Send the running bash command to background (usage: /bg [jobid]; 단축키 ctrl+q 권장)",
-		handler: async (args, ctx) => {
-			const r = tryBackground(ctx.sessionManager.getSessionId(), args);
-			ctx.ui.notify(r.message, r.ok ? "info" : "warning");
-		},
-	});
-
-	pi.registerCommand("bglist", {
-		description: "List background jobs",
-		handler: async (_args, ctx) => {
-			const sessionId = ctx.sessionManager.getSessionId();
-			const jobs = scanJobs().filter((j) => j.sessionId === sessionId && j.backgrounded);
-			if (jobs.length === 0) {
-				ctx.ui.notify("백그라운드 작업 없음", "info");
-				return;
-			}
-			const lines = jobs.map((j) => {
-				const icon = j.status === "running" ? "⏳" : j.status === "done" ? (j.exitCode === 0 ? "✓" : "✗") : "💀";
-				const started = new Date(j.started).toLocaleTimeString("ko-KR", { hour12: false });
-				const exit = j.status === "done" ? ` exit=${j.exitCode}` : "";
-				const bg = j.status === "running" && (!j.wrapperAlive || j.wrapperPid === j.jobPid) ? " [bg]" : "";
-				return `${icon} ${j.id}  ${started}  ${j.status}${exit}${bg}  ${cmdSummary(j.cmd, 60)}\n    log: ${j.logPath}`;
-			});
-			ctx.ui.notify(lines.join("\n"), "info");
-		},
-	});
-
-	pi.registerCommand("bgkill", {
-		description: "Kill a background job (usage: /bgkill <jobid|all>)",
-		handler: async (args, ctx) => {
-			const arg = (args ?? "").trim();
-			if (!arg) {
-				ctx.ui.notify("사용법: /bgkill <jobid|all>", "warning");
-				return;
-			}
-			const sessionId = ctx.sessionManager.getSessionId();
-			const jobs = scanJobs().filter(
-				(j) => j.sessionId === sessionId && j.backgrounded && j.status !== "gone",
-			);
-			const targets = arg === "all" ? jobs : jobs.filter((j) => j.id === arg);
-			if (targets.length === 0) {
-				ctx.ui.notify(`종료할 작업이 없습니다: ${arg}`, "warning");
-				return;
-			}
-			for (const j of targets) {
-				const killed = killJob(j);
-				ctx.ui.notify(
-					killed
-						? `작업 ${j.id} 종료 요청 (log: ${j.logPath})`
-						: `작업 ${j.id} 는 이미 종료되었습니다`,
-					killed ? "info" : "warning",
-				);
-			}
-		},
-	});
-
-	// 커맨드 등록 직후 자동완성 메뉴를 재빌드해 새 커맨드를 즉시 노출 (identity wrapper)
-	ui?.addAutocompleteProvider((current) => current);
-}
-
-// ---------------------------------------------------------------------------
-// 완료 자동 주입 — [bg notice] 프리픽스 대신, 작업 완료를 감지해 에이전트 큐에
-// 주입한다 (pi.sendMessage, deliverAs:'followUp' + triggerTurn:true).
-//  - 감지: fs.watch(BG_DIR, {recursive:true}) 이벤트 + 5s 폴백(관심 job 존재 시에만)
+// 완료 자동 주입 — 작업 완료를 감지해 에이전트 큐에 주입
+// (pi.sendMessage, deliverAs:'followUp' + triggerTurn:true).
+//  - 감지: fs.watch(BG_DIR, recursive) 이벤트 + 5s 폴백(관심 job 존재 시에만)
+//    (Linux는 fs.watch 미사용 — Node 22에서 FSWatcher.unref() 무효, dc79e5e)
 //  - 새 완료(exit 파일 + notified 미기록)를 debounce(1.5s)로 배치해 한 메시지로 주입
 //  - 소유 세션의 완료만. 로드/세션 시작 시 기존 done job은 전부 notified 마킹(백로그 미보고)
 //  - # bg:quiet 마커가 있는 명령의 완료는 통지 생략
@@ -552,7 +382,7 @@ export function sweep(pi: ExtensionAPI, sessionId: string): void {
 	}
 }
 
-// 관심 job(이 세션의 실행 중/미통지 완료 backgrounded)이 있을 때만 폴백 interval 유지.
+// 관심 job(이 세션의 실행 중/미통지 완료 backgrounded)이 있을 때만 폴백 sweep 수행.
 function hasInterest(sessionId: string): boolean {
 	return scanJobs().some(
 		(j) =>
@@ -567,7 +397,7 @@ function ensureSweeper(pi: ExtensionAPI, sessionId: string): void {
 	if (sweepTimer) return;
 	sweepTimer = setInterval(() => {
 		// 폴링 감지는 세션 내내 유지(unref)한다 — Linux처럼 fs.watch를 못 쓰는 환경에서도
-		// 새 bg 작업 시작·완료를 감지하게 하기 위함(비용은 5s마다 readdir(/tmp/pi-bg)뿐).
+		// 새 bg 작업 시작·완료를 감지하게 하기 위함(비용은 5s마다 readdir(BG_DIR)뿐).
 		if (hasInterest(ownerSessionId)) sweep(pi, ownerSessionId);
 	}, SWEEP_MS);
 	// unref: 이 interval만으로 프로세스가 살아있지 않게 한다.
@@ -608,20 +438,15 @@ function startWatcher(pi: ExtensionAPI, sessionId: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// 툴 콜 래핑
+// 커맨드·단축키 등록 — /bg 계열은 항상 등록 (job 진입점이므로 조건부 등록 폐기)
 // ---------------------------------------------------------------------------
 export default function (pi: ExtensionAPI) {
-	// -----------------------------------------------------------------------
-	// /bgrun <cmd> — Phase 1 사용자 경로 (redesign §7).
-	// job을 만드는 진입점이므로 무조건 등록 (조건부 등록은 /bg·/bglist·/bgkill에만).
-	// Phase 2에서 /bg로 승격 예정.
-	// -----------------------------------------------------------------------
-	pi.registerCommand("bgrun", {
-		description: "Run a command in background (usage: /bgrun <command>)",
+	pi.registerCommand("bg", {
+		description: "Run a command in background (usage: /bg <command>)",
 		handler: async (args, ctx) => {
 			const raw = (args ?? "").trim();
 			if (!raw) {
-				ctx.ui.notify("사용법: /bgrun <command>  (예: /bgrun npm install)", "warning");
+				ctx.ui.notify("사용법: /bg <command>  (예: /bg npm install)", "warning");
 				return;
 			}
 			const quiet = raw.includes(QUIET_MARKER);
@@ -635,106 +460,118 @@ export default function (pi: ExtensionAPI) {
 				sessionId: ctx.sessionManager.getSessionId(),
 				quiet,
 			});
-			registerBgCommands(pi, ctx.ui);
 			ctx.ui.notify(
 				`[bg] 백그라운드 시작\n` +
-				`  job: ${jobId}\n` +
-				`  pid: ${jobPid}\n` +
-				`  log: ${logPath}\n` +
-				`완료 시 자동으로 보고됩니다. /bglist로 상태 확인.`,
+					`  job: ${jobId}\n` +
+					`  pid: ${jobPid}\n` +
+					`  log: ${logPath}\n` +
+					`완료 시 자동으로 보고됩니다. /bglist로 상태 확인.`,
 				"info",
 			);
 		},
 	});
 
-	pi.on("tool_call", (event, ctx) => {
-		if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
-		const cmd = event.input.command;
-
-		// (Phase 1, G8) `# bg:run` 마커 — 에이전트용 opt-in. 모델은 슬래시 커맨드를
-		// 실행할 수 없으므로 bash 명령 내 마커로 백그라운딩. 래핑 없이 직접 spawn,
-		// 툴 콜은 즉시 반환 → 완료 시 기존 자동 주입으로 결과 통지 (폐루프).
-		if (cmd.includes(BG_RUN_MARKER)) {
-			const quiet = cmd.includes(QUIET_MARKER);
-			const cleaned = cmd.split(BG_RUN_MARKER).join("").split(QUIET_MARKER).join("").trim();
-			if (!cleaned) return;
-			const { jobId } = spawnBackground({
-				cmd: cleaned,
-				sessionId: ctx.sessionManager.getSessionId(),
-				quiet,
+	pi.registerCommand("bglist", {
+		description: "List background jobs",
+		handler: async (_args, ctx) => {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const jobs = scanJobs().filter((j) => j.sessionId === sessionId && j.backgrounded);
+			if (jobs.length === 0) {
+				ctx.ui.notify("백그라운드 작업 없음", "info");
+				return;
+			}
+			const lines = jobs.map((j) => {
+				const icon = j.status === "running" ? "⏳" : j.status === "done" ? (j.exitCode === 0 ? "✓" : "✗") : "💀";
+				const started = new Date(j.started).toLocaleTimeString("ko-KR", { hour12: false });
+				const exit = j.status === "done" ? ` exit=${j.exitCode}` : "";
+				const bg = j.status === "running" && (!j.wrapperAlive || j.wrapperPid === j.jobPid) ? " [bg]" : "";
+				return `${icon} ${j.id}  ${started}  ${j.status}${exit}${bg}  ${cmdSummary(j.cmd, 60)}\n    log: ${j.logPath}`;
 			});
-			// (v2.1-A) "started in" — 실행 전 백그라운딩이므로 mid-execution 전환("moved to")과 구분
-			event.input.command = `echo "[bg] started in background job=${jobId} (완료 시 자동 통지됩니다)"`;
-			return;
-		}
-
-		if (cmd.includes(BG_OFF_MARKER)) {
-			event.input.command = cmd.split(BG_OFF_MARKER).join("");
-			return;
-		}
-		const quiet = cmd.includes(QUIET_MARKER);
-		const cleaned = quiet ? cmd.split(QUIET_MARKER).join("") : cmd;
-		event.input.command = wrapCommand(cleaned, ctx.sessionManager.getSessionId(), quiet);
+			ctx.ui.notify(lines.join("\n"), "info");
+		},
 	});
 
-	// -----------------------------------------------------------------------
-	// ctrl+q — 실행 중인 bash 명령을 백그라운드로 전환 (주 경로)
-	// 툴 실행 중 타이핑은 큐잉되지만 단축키는 키 레벨에서 즉시 처리된다.
-	// -----------------------------------------------------------------------
-	pi.registerShortcut("ctrl+q", {
-		description: "Send the running bash command to background",
-		handler: async (ctx) => {
-			const r = tryBackground(ctx.sessionManager.getSessionId());
-			if (r.ok) registerBgCommands(pi, ctx.ui);
-			ctx.ui.notify(`[bg-s] ${r.message}`, r.ok ? "info" : "warning");
+	pi.registerCommand("bgkill", {
+		description: "Kill a background job (usage: /bgkill <jobid|all>)",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim();
+			if (!arg) {
+				ctx.ui.notify("사용법: /bgkill <jobid|all>", "warning");
+				return;
+			}
+			const sessionId = ctx.sessionManager.getSessionId();
+			const jobs = scanJobs().filter(
+				(j) => j.sessionId === sessionId && j.backgrounded && j.status !== "gone",
+			);
+			const targets = arg === "all" ? jobs : jobs.filter((j) => j.id === arg);
+			if (targets.length === 0) {
+				ctx.ui.notify(`종료할 작업이 없습니다: ${arg}`, "warning");
+				return;
+			}
+			for (const j of targets) {
+				const killed = killJob(j);
+				ctx.ui.notify(
+					killed
+						? `작업 ${j.id} 종료 요청 (log: ${j.logPath})`
+						: `작업 ${j.id} 는 이미 종료되었습니다`,
+					killed ? "info" : "warning",
+				);
+			}
 		},
 	});
 
 	// -----------------------------------------------------------------------
-	// /bg 계열 커맨드 노출 조건:
-	//  - 세션 시작 시 잔여 백그라운드 프로세스가 있으면 등록
-	//  - bash 툴 콜이 백그라운드 상태로 종료되면 등록 (ctrl+q/bgnow 등 외부 경로 포함)
-	//  - input 핸들러에서 백그라운드 작업 발견 시에도 등록
+	// ctrl+q — 실행 중 /bg 작업 상태 표시 (redesign §5.2)
+	// 구 "실행 중 포그라운드 명령 백그라운딩"은 폐기 — 시작 시점에
+	// /bg (사용자) · # bg:run (에이전트) 으로 명시한다.
 	// -----------------------------------------------------------------------
-	pi.on("session_start", (event, ctx) => {
-		const sessionId = ctx.sessionManager.getSessionId();
-		if (hasBackgroundedJob(sessionId)) registerBgCommands(pi, ctx.ui);
-		startWatcher(pi, sessionId);
+	pi.registerShortcut("ctrl+q", {
+		description: "Show status of background jobs (was: send running bash to background)",
+		handler: async (ctx) => {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const jobs = scanJobs().filter(
+				(j) => j.sessionId === sessionId && j.backgrounded && j.status === "running",
+			);
+			if (jobs.length === 0) {
+				ctx.ui.notify(
+					"[bg-s] 백그라운드 작업 없음. 백그라운드로 실행할 명령은 /bg <command> 로 실행하세요.",
+					"info",
+				);
+				return;
+			}
+			const latest = jobs.sort((a, b) => b.started - a.started)[0];
+			const tail = lastLines(readTailFile(latest.logPath, 4096), 10);
+			ctx.ui.notify(
+				`[bg-s] 실행 중: ${latest.id} (pid=${latest.jobPid})\n${tail}\n` +
+					`전체 로그: ${latest.logPath}\n` +
+					`중단: /bgkill ${latest.id}`,
+				"info",
+			);
+		},
 	});
 
-	pi.on("tool_execution_end", (event, ctx) => {
-		if (event.toolName === "bash" && hasBackgroundedJob(ctx.sessionManager.getSessionId())) {
-			registerBgCommands(pi, ctx.ui);
-		}
+	// -----------------------------------------------------------------------
+	// 툴 콜 — `# bg:run` 마커만 재작성, 나머지는 통과 (무래핑, G4)
+	// 모델은 슬래시 커맨드를 실행할 수 없으므로 bash 명령 내 마커가
+	// 에이전트용 opt-in 경로이다 (G8).
+	// -----------------------------------------------------------------------
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
+		const cmd = event.input.command;
+		if (!cmd.includes(BG_RUN_MARKER)) return; // 기본: 무래핑 통과
+		const quiet = cmd.includes(QUIET_MARKER);
+		const cleaned = cmd.split(BG_RUN_MARKER).join("").split(QUIET_MARKER).join("").trim();
+		if (!cleaned) return;
+		const { jobId } = spawnBackground({
+			cmd: cleaned,
+			sessionId: ctx.sessionManager.getSessionId(),
+			quiet,
+		});
+		// (v2.1-A) "started in" — 실행 전 백그라운딩이므로 mid-execution 전환("moved to")과 구분
+		event.input.command = `echo "[bg] started in background job=${jobId} (완료 시 자동 통지됩니다)"`;
 	});
 
-	// -----------------------------------------------------------------------
-	// input 핸들러 — [bg notice] 프리픽스는 폐지(완료 시 sendMessage 자동 주입으로 대체).
-	// 여기서는 미등록 /bg* 폴백 안내와 커맨드 노출만 담당한다.
-	// -----------------------------------------------------------------------
-	pi.on("input", (event, ctx) => {
-		if (event.source !== "interactive") return { action: "continue" };
-		if (!event.text || !event.text.trim()) return { action: "continue" };
-		const text = event.text.trim();
-
-		// 미등록 상태에서 /bg 계열 타이핑 → 작업이 없어 비활성화 상태임을 안내
-		if (
-			!bgCommandsRegistered &&
-			(text === "/bg" ||
-				text.startsWith("/bg ") ||
-				text === "/bglist" ||
-				text.startsWith("/bglist ") ||
-				text === "/bgkill" ||
-				text.startsWith("/bgkill "))
-		) {
-			ctx.ui.notify("백그라운드 작업이 없어 /bg 계열 명령이 비활성화되어 있습니다", "warning");
-			return { action: "handled" };
-		}
-
-		const sessionId = ctx.sessionManager.getSessionId();
-		if (hasBackgroundedJob(sessionId)) registerBgCommands(pi, ctx.ui);
-		// 완료 통지는 프롬프트 프리픽스([bg notice])가 아니라 완료 시 큐 자동 주입
-		// (sendMessage, sweep/watch)으로 바뀌었다 — 여기서는 아무것도 삽입하지 않는다.
-		return { action: "continue" };
+	pi.on("session_start", (_event, ctx) => {
+		startWatcher(pi, ctx.sessionManager.getSessionId());
 	});
 }

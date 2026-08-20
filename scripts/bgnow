@@ -1,55 +1,89 @@
 #!/usr/bin/env bash
-# bgnow — 실행 중인 pi bash 툴 작업을 백그라운드로 전환 (SIGUSR1)
-# 사용법: bgnow [jobid]  (미지정 시 전환 가능한 작업이 하나일 때만 선택)
-# 다른 tmux 패널 등 pi 밖에서 실행 가능. pi 내부에서는 ctrl+q 단축키가 주 경로.
+# bgnow — 백그라운드 작업 조회·종료 (redesign Phase 3, 2026-08-20)
+#
+# SIGUSR1 기반 "실행 중 포그라운드 명령 백그라운딩"은 폐기됐다 —
+# 백그라운딩은 시작 시점에 명시한다: pi 안에서 `/bg <cmd>`, 에이전트는 `# bg:run` 마커.
+# 이 스크립트는 tmux 패널 등 pi 밖에서의 상태 조회·종료용으로 재목적화됐다.
+#
+# 사용법:
+#   bgnow list            모든 작업 상태 (⏳ running / ✓ done / ✗ failed / 💀 gone)
+#   bgnow status <jobid>  exit code + 마지막 20줄 로그
+#   bgnow kill <jobid>    프로세스 그룹 종료 (SIGTERM; pi 안에서는 /bgkill 권장 —
+#                         /bgkill은 2초 후 SIGKILL 에스컬레이션까지 수행)
+#
+# 호환: 구 `bgnow [jobid]` (전환 호출) 형식은 deprecation 경고 후 status로 폴백.
 BG_DIR="${PI_BG_DIR:-/tmp/pi-bg}"
 
-eligible() {
-  local d="$1" wp jobpid
-  [ -d "$d" ] || return 1
-  [ -f "$d/session" ] || return 1
-  [ ! -e "$d/exit" ] || return 1
-  [ ! -e "$d/backgrounded" ] || return 1
-  wp=$(cat "$d/pid" 2>/dev/null || echo 0)
-  jobpid=$(cat "$d/jobpid" 2>/dev/null || echo 0)
-  kill -0 "$wp" 2>/dev/null && kill -0 "$jobpid" 2>/dev/null
+list_jobs() {
+  local found=0 d id jobpid cmdline
+  for d in "$BG_DIR"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    id=$(basename "$d")
+    jobpid=$(cat "$d/jobpid" 2>/dev/null || echo 0)
+    cmdfile=$(head -c 60 "$d/cmd" 2>/dev/null | tr '\n' ' ')
+    if [ -f "$d/exit" ]; then
+      local code
+      code=$(cat "$d/exit" 2>/dev/null)
+      if [ "$code" = "0" ]; then
+        printf '✓ %s  exit=0  %s\n' "$id" "$cmdfile"
+      else
+        printf '✗ %s  exit=%s  %s\n' "$id" "$code" "$cmdfile"
+      fi
+    elif kill -0 "$jobpid" 2>/dev/null; then
+      printf '⏳ %s  pid=%s  %s\n' "$id" "$jobpid" "$cmdfile"
+    else
+      printf '💀 %s  (gone)  %s\n' "$id" "$cmdfile"
+    fi
+    found=1
+  done
+  [ "$found" = 1 ] || echo "bgnow: 작업 없음"
 }
 
-target=""
-if [ -n "${1:-}" ]; then
-  case "$1" in
-    */*|.|..) echo "bgnow: 잘못된 jobid: $1" >&2; exit 2 ;;
-  esac
-  target="$BG_DIR/$1"
-  if ! eligible "$target"; then
-    echo "bgnow: 전환 가능한 작업이 아님: $1" >&2
-    exit 1
-  fi
-else
-  candidates=()
-  for d in "$BG_DIR"/*/; do
-    d="${d%/}"
-    eligible "$d" && candidates+=("$d")
-  done
-  if [ "${#candidates[@]}" -eq 0 ]; then
-    echo "bgnow: 전환 가능한 실행 중 작업 없음" >&2
-    exit 1
-  fi
-  if [ "${#candidates[@]}" -gt 1 ]; then
-    echo "bgnow: 여러 Pi 세션의 작업이 실행 중입니다. jobid를 지정하세요:" >&2
-    for d in "${candidates[@]}"; do
-      printf '  %s  session=%s\n' "$(basename "$d")" "$(cat "$d/session" 2>/dev/null)" >&2
-    done
-    exit 2
-  fi
-  target="${candidates[0]}"
-fi
-
-wp=$(cat "$target/pid")
-if kill -USR1 "$wp"; then
-  : > "$target/backgrounded"
-  echo "bgnow: 작업 $(basename "$target") → 백그라운드 전환 (log: $target/log)"
-else
-  echo "bgnow: 전환 신호 전달 실패: $(basename "$target")" >&2
-  exit 1
-fi
+case "${1:-list}" in
+  list|ls)
+    list_jobs
+    ;;
+  status|s)
+    id="${2:?사용법: bgnow status <jobid>}"
+    d="$BG_DIR/$id"
+    [ -d "$d" ] || { echo "bgnow: 없는 작업: $id" >&2; exit 1; }
+    if [ -f "$d/exit" ]; then
+      echo "exit=$(cat "$d/exit")"
+    else
+      echo "running (pid=$(cat "$d/jobpid" 2>/dev/null))"
+    fi
+    echo "--- log (마지막 20줄) ---"
+    tail -n 20 "$d/log" 2>/dev/null
+    echo "--- 전체 로그: $d/log ---"
+    ;;
+  kill|k)
+    id="${2:?사용법: bgnow kill <jobid>}"
+    d="$BG_DIR/$id"
+    [ -d "$d" ] || { echo "bgnow: 없는 작업: $id" >&2; exit 1; }
+    jobpid=$(cat "$d/jobpid" 2>/dev/null || echo 0)
+    if ! kill -0 "$jobpid" 2>/dev/null; then
+      echo "bgnow: 이미 종료됨: $id" >&2
+      exit 1
+    fi
+    # 신 형식 job: job bash가 PGID 리더 → -PID 그룹 킬. 구 형식 폴백: 개별 PID.
+    if kill -- "-$jobpid" 2>/dev/null; then
+      echo "bgnow: 그룹 종료 신호 전달 job=$id pgid=$jobpid (SIGKILL 에스컬레이션은 pi /bgkill 전용)"
+    elif kill "$jobpid" 2>/dev/null; then
+      echo "bgnow: 개별 종료 신호 전달 job=$id pid=$jobpid"
+    else
+      echo "bgnow: 신호 전달 실패: $id" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    # 구 형식 호환: `bgnow <jobid>` (전환 호출) → deprecation 경고 후 status 폴백
+    if [ -n "${1:-}" ] && [ -d "$BG_DIR/$1" ]; then
+      echo "bgnow: 전환 기능은 폐기됨 (백그라운딩은 /bg <cmd> 또는 # bg:run 마커로) — status 표시로 폴백" >&2
+      "$0" status "$1"
+    else
+      echo "사용법: bgnow {list|status <id>|kill <id>}" >&2
+      exit 2
+    fi
+    ;;
+esac

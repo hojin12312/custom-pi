@@ -1,6 +1,6 @@
 # 🛠 bg.ts Architectural Redesign — Implementation Plan
 
-> **Status**: Draft v2.1 (사소한 이슈 3개 패치) · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST) · **Revised**: 2026-08-19 (KST) — 코드 대조 리뷰 반영 + 사소한 이슈 3개 패치(v2.1-A/B/C), 변경 이력 §15
+> **Status**: ✅ Phase 1~3 구현 완료 (2026-08-20) · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST) · **Revised**: 2026-08-19 (KST) — 코드 대조 리뷰 반영 + 사소한 이슈 3개 패치(v2.1-A/B/C), 변경 이력 §15 · **Implemented**: 2026-08-20 (KST) — Phase 1~3 일괄 구현 (사용자 지시로 모니터링 대기 없이 진행), 구현 이력 §15.2
 > **Scope**: `extensions/bg.ts` 전면 redesign (wrapper 스크립트 + `/bg` 커맨드 + `ctrl+q` 정책)
 > **관련 이슈**: tail 고아 누적, 파이프 오염, `pkill` 자기 재귀, 무조건 래핑 오버헤드
 
@@ -690,8 +690,12 @@ test("# bg:quiet suppresses notification", async () => {
 - [ ] **Q1-Q4 결정**: Q1(`bgnow` 재작성 — Phase 3 직전 필요), Q3(프롬프트 가이드) 미결정. Q2는 R-11로 `PI_BG_OPT_IN` 확정, Q4는 분리 확정
 - [x] **Phase 1 구현**: 2026-08-20 — `spawnBackground()` + `/bgrun` + `# bg:run` 마커 (구 래핑 경로 병렬 유지)
   - 구현 중 발견·수정: 명령이 `exit N`을 호출하면 스크립트 자체도 종료돼 exit 파일 미기록 → **명령을 서브셸에서 eval** `( eval ... )`
-- [x] **테스트 통과**: `tests/bg-redesign.test.mjs` 9/9 (PGID 격리·exit code·다중 라인·자동 주입·quiet·무래핑 통과·고아 tail 없음) + 회귀 2/2
-- [ ] **Phase 1 수동 검증**: TUI 실동작 (`/bgrun` 실제 사용, `pi -p` 종료 확인) + 1주일 모니터링 → Phase 2
+- [x] **Phase 2 구현**: 2026-08-20 (사용자 지시로 모니터링 대기 없이 바로 진행) — `wrapCommand()` 호출 제거·무래핑 통과(G4), `/bgrun`→`/bg` 승격, `ctrl+q` 상태표시화, `/bg`·`/bglist`·`/bgkill` 항상 등록, `bgCommandsRegistered`·`tryBackground`·`input`/`tool_execution_end` 게이트 로직 제거
+- [x] **Phase 3 구현**: 2026-08-20 — `wrapCommand()`·`# bg:off`·`PI_BG_OPT_IN` 완전 제거, `killJob` R-8 폴백 순서(-jobPid→-wrapperPid→jobPid) + R-9 `.unref()`, `scripts/bgnow` 옵션 B 재작성(list/status/kill, 구형식 호출은 deprecation 경고 후 status 폴백 — 실동작 검증 완료), 구 회귀 테스트 물리 삭제
+- [x] **테스트 통과**: `tests/bg-redesign.test.mjs` 10/10 (PGID 격리·그룹 킬·exit code·다중 라인·자동 주입·quiet·`/bg` 무조건 등록·무래핑 통과·ctrl+q 상태표시·고아 tail 없음)
+- [ ] **수동 검증**: TUI 실동작 (`/bg` 실제 사용, `pi -p` 종료 확인) + 실사용 모니터링 → Phase 4(RFC) 결정
+
+> **Q1 결정 (2026-08-20)**: `bgnow` **옵션 B(재작성) 채택** — list/status/kill 상태 조회 전용, 구형식 호환 폴백 포함.
 
 **리뷰 후 수정 사항은 본 문서에 직접 반영 (체크박스 + 변경 이력 섹션 추가)**.
 
@@ -715,6 +719,24 @@ test("# bg:quiet suppresses notification", async () => {
 | **R-9** | §5.4 | SIGKILL 에스컬레이션 `setTimeout().unref()` | `pi -p`(원샷)에서 kill 호출 시 타이머만으로 프로세스가 2s 더 생존 — G7 회귀. (호스트가 먼저 종료하면 에스컬레이션 미수행은 허용, 문서화) |
 | **R-10** | §4 | 완료 감지의 Linux 폴링 전용 명시 | dc79e5e: Linux/Node 22에서 `FSWatcher.unref()` 무효 → Linux는 `fs.watch` 미사용. 다이어그램의 `fs.watch`만 보고 구현하면 G7 회귀 |
 | **R-11** | §5.9, §7 | settings.json `bg.useOptIn` → `PI_BG_OPT_IN` env var | extension은 현재 env var(`PI_BG_*`)만 읽고 settings 읽기 메커니즘이 없음 — 기존 패턴 통일, 미기재 의존 제거 |
+
+### 15.2 구현 이력 — 2026-08-20 Phase 1~3 일괄 구현
+
+사용자 지시로 Phase 1 모니터링 대기 없이 Phase 2·3까지 연속 구현.
+
+| 페이즈 | 내용 | 비고 |
+|---|---|---|
+| Phase 1 | `spawnBackground()` + `/bgrun` + `# bg:run` 마커 (병렬 배포) | 커밋 `838d8b0` |
+| Phase 2 | 무래핑 통과(G4), `/bg` 승격, `ctrl+q` 상태표시, 항상 등록, 게이트 로직 제거 | `PI_BG_OPT_IN` 게이트는 Phase 3에서 함께 제거되므로 건너뜀 |
+| Phase 3 | `wrapCommand`·`# bg:off` 완전 제거, `killJob` R-8/R-9, `bgnow` 옵션 B 재작성, 구 회귀 테스트 삭제 | Q1 = 옵션 B 채택 |
+
+**구현 중 발견·반영한 추가 수정**:
+- 명령이 `exit N`을 호출하면 스크립트(부모 bash) 자체가 종료돼 exit 파일 미기록 → 명령을 **서브셸에서 eval** `( eval "$(cat ...)" )`
+- `PI_BG_STALE_MS` env var 신규 (플랜 §5.9 예고분, 하드코딩 24h → 오버라이드 가능)
+- `bgnow` kill은 SIGTERM만 전달 (SIGKILL 에스컬레이션은 pi `/bgkill` 전용 — 스크립트 헤더에 명시)
+
+**검증**: `tests/bg-redesign.test.mjs` 10/10 · `bgnow` list/status/kill/구형식 호환 실동작 확인
+**남은 것**: TUI 실동작 수동 검증 + 실사용 모니터링 (Phase 4 RFC 결정 전제)
 
 ### 15.1 v2.1 패치 — 2026-08-19 사소한 이슈 3개
 
