@@ -1,0 +1,59 @@
+--- a/@earendil-works/pi-agent-core/dist/agent-loop.js  (pi-agent-core 0.84.2, pinned to pi-coding-agent 0.84.2)
++++ b/@earendil-works/pi-agent-core/dist/agent-loop.js
+@@ -198,7 +198,55 @@
+     });
+     let partialMessage = null;
+     let addedPartial = false;
+-    for await (const event of response) {
++    // --- local patch (2026-08-20, stream idle-timeout): see docs/PI-STREAM-IDLE-TIMEOUT-PATCH.md ---
++    // Root cause: some provider adapters can leave this EventStream's internal queue empty
++    // forever (never push a "done"/"error" event) if the underlying HTTP stream closes
++    // without the terminal chunk the adapter expects. `for await` then hangs on
++    // EventStream's internal `waiting` promise with no way out: 0% CPU, no open sockets,
++    // the turn never gets a stopReason. This races each `next()` call against an idle
++    // timer and force-completes the stream on timeout instead of hanging forever.
++    const PI_STREAM_IDLE_TIMEOUT_MS = Math.max(5000, Number(process.env.PI_STREAM_IDLE_TIMEOUT_MS ?? 180000));
++    const __piStreamIterator = response[Symbol.asyncIterator]();
++    while (true) {
++        let step;
++        let idleTimer;
++        let timedOut = false;
++        try {
++            step = await Promise.race([
++                __piStreamIterator.next(),
++                new Promise((resolve) => {
++                    idleTimer = setTimeout(() => {
++                        timedOut = true;
++                        resolve({ done: true, value: undefined });
++                    }, PI_STREAM_IDLE_TIMEOUT_MS);
++                }),
++            ]);
++        }
++        finally {
++            clearTimeout(idleTimer);
++        }
++        if (timedOut) {
++            const finalMessage = {
++                ...(partialMessage ?? { role: "assistant", content: [] }),
++                stopReason: "error",
++                error: `stream idle timeout after ${PI_STREAM_IDLE_TIMEOUT_MS}ms (no event received from provider)`,
++            };
++            if (typeof response.end === "function") {
++                response.end(finalMessage);
++            }
++            if (addedPartial) {
++                context.messages[context.messages.length - 1] = finalMessage;
++            }
++            else {
++                context.messages.push(finalMessage);
++                await emit({ type: "message_start", message: { ...finalMessage } });
++            }
++            await emit({ type: "message_end", message: finalMessage });
++            return finalMessage;
++        }
++        if (step.done)
++            break;
++        const event = step.value;
+         switch (event.type) {
+             case "start":
+                 partialMessage = event.partial;

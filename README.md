@@ -29,6 +29,15 @@ Custom extensions, core packages, and configuration templates for [Pi Coding Age
 
 ---
 
+## 🩹 Local Core Patches (`patches/`)
+
+Surgical local patches to Pi's own core dependency packages (not custom-pi extensions) — applied directly to installed `node_modules`, documented and reapplied after upgrades.
+
+* 🧊 **Stream idle-timeout (2026-08-20, applied Studio·MBP·PICS)**: `@earendil-works/pi-agent-core`'s `agent-loop.js` consumes each turn's model response via `for await` over an `EventStream`. If a provider adapter's SSE stream closes without ever pushing a terminal `"done"`/`"error"` event, that `for await` hangs forever with **0% CPU, 0 open sockets, no error** — the turn never gets a `stopReason`, the TUI freezes on `Thinking...` indefinitely (root-caused live on a hung PICS session: full response already received and persisted, but `stopReason: null`). Patch races each stream event against an idle timer (`PI_STREAM_IDLE_TIMEOUT_MS`, default 180s) and force-completes the turn with `stopReason: "error"` on timeout — preserves any partial content already streamed, feeds into pi's existing error/auto-retry path. Provider-agnostic (single chokepoint all model calls pass through). Details, diff, and reapply/rollback commands: [`docs/PI-STREAM-IDLE-TIMEOUT-PATCH.md`](docs/PI-STREAM-IDLE-TIMEOUT-PATCH.md).
+* ⚠️ **pi-subagents spinner fix (2026-08-14)** — see pillar 2 above and [`docs/PI-SUBAGENTS-SPINNER-FIX.md`](docs/PI-SUBAGENTS-SPINNER-FIX.md).
+
+---
+
 ## 📋 Essential Custom Extensions (`extensions/`)
 
 `custom-pi` includes essential developer productivity tools:
