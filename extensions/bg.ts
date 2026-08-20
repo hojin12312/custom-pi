@@ -34,6 +34,15 @@
  *     프롬프트 인젝션을 방지한다. 소유 세션의 완료만, 1회만 통지(notified 마커).
  *     # bg:quiet: 이 마커가 있는 명령의 완료는 통지 생략.
  *
+ * Phase 1 (redesign, 2026-08-20 — docs/BG-REDESIGN-PLAN.md):
+ *  - /bgrun <cmd> — 사용자 경로. 래퍼/tail 없이 extension이 detached bash(새 PGID)로
+ *    직접 spawn. Phase 2에서 /bg로 승격 예정 (구 /bg [id] 전환 의미와 이름 충돌 회피).
+ *  - `# bg:run` 마커 — 에이전트 경로(G8). 모델은 슬래시 커맨드를 실행할 수 없으므로
+ *    bash 명령에 마커를 붙이면 tool_call이 spawnBackground()로 재작성하고 툴 콜은
+ *    즉시 반환. 완료 시 기존 자동 주입으로 결과 통지 (사용자 개입 0회).
+ *  - Phase 1은 병렬 배포: 마커 없는 명령은 기존 무조건 래핑+ctrl+q 동작 그대로.
+ *    (기본값 전환은 PI_BG_OPT_IN env var, Phase 2)
+ *
  * opt-out: 에이전트가 특정 명령을 래핑에서 제외하려면 명령 안에 `# bg:off` 포함.
  *
  * 롤백: 이 파일을 ~/.pi/agent/extensions/ 에서 제거하고 /reload 하면 끝.
@@ -42,12 +51,14 @@
  */
 
 import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, rmSync, openSync, fstatSync, readSync, closeSync, watch, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BG_DIR = process.env.PI_BG_DIR?.trim() || "/tmp/pi-bg";
 const BG_OFF_MARKER = "# bg:off";
 const QUIET_MARKER = "# bg:quiet"; // 이 마커가 있는 명령의 완료는 통지 생략
+const BG_RUN_MARKER = "# bg:run"; // (Phase 1, G8) 에이전트용 백그라운딩 opt-in — 래핑 없이 직접 spawn
 const STALE_MS = 24 * 60 * 60 * 1000; // 완료/유실 작업 디렉토리 보존 후 정리
 const SWEEP_MS = Math.max(1000, Number(process.env.PI_BG_SWEEP_MS ?? 5000));
 const DEBOUNCE_MS = Math.max(0, Number(process.env.PI_BG_DEBOUNCE_MS ?? 1500)); // 동시 완료 배치 — 완료 N건을 한 메시지로
@@ -94,6 +105,62 @@ function wrapCommand(original: string, sessionId: string, quiet = false): string
 		`if [ ! -e "$DIR/backgrounded" ]; then rm -rf "$DIR"; fi`,
 		`exit $CODE`,
 	].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 (redesign §5.1): 직접 백그라운딩 — 래퍼/tail 없음.
+// extension이 detached bash(새 PGID)를 spawn하고 로그를 파일로 쓴다.
+// 사용자: /bgrun <cmd> · 에이전트: `# bg:run` 마커. 완료 감지·통지는 기존 sweep/watch 재사용.
+// ---------------------------------------------------------------------------
+let jobSeq = 0;
+
+function spawnBackground(opts: { cmd: string; sessionId: string; quiet?: boolean }): {
+	jobId: string;
+	jobPid: number;
+	logPath: string;
+} {
+	const { cmd, sessionId, quiet = false } = opts;
+	// jobId: pid-epoch-seq (seq로 동일 ms 충돌 방지 — 부하 테스트 대비)
+	const jobId = `${process.pid}-${Date.now()}-${jobSeq++}`;
+	const jobDir = join(BG_DIR, jobId);
+	mkdirSync(jobDir, { recursive: true });
+
+	// 메타데이터 — cmd/session은 평문 (R-7: 현행 래퍼도 디코드 후 평문 기록)
+	writeFileSync(join(jobDir, "cmd"), cmd);
+	writeFileSync(join(jobDir, "session"), sessionId);
+	writeFileSync(join(jobDir, "backgrounded"), "1"); // /bgrun·# bg:run은 항상 backgrounded
+	if (quiet) writeFileSync(join(jobDir, "quiet"), "1");
+
+	const logPath = join(jobDir, "log");
+	const logFd = openSync(logPath, "w");
+
+	// (R-4) 명령을 스크립트에 임베드하지 않고 파일로 eval —
+	// bash 이중인쇄 문자열은 JSON 이스케이프(\n 등)를 해석하지 않아 다중 라인 명령이 깨진다.
+	// jobDir은 [A-Za-z0-9-]만 포함하므로 단일 인클루드 안전.
+	// (테스트 발견) 명령을 서브셸에서 eval — 명령 자체가 `exit N`을 호출해도
+	// 스크립트(부모 bash)는 살아남아 exit 파일을 기록한다. (SIGTERM 등 그룹 킬은
+	// exit 파일 없이 "gone" 상태 — 구 래퍼와 동일 동작)
+	const jobScript = [
+		"set +e",
+		`( eval "$(cat '${jobDir}/cmd')" )`,
+		"C=$?",
+		`echo "$C" > '${jobDir}/exit'`,
+		"exit $C",
+	].join("\n");
+
+	// detached:true → Unix에서 새 process group (그룹 킬 가능, setsid 불필요)
+	const child = spawn("bash", ["-c", jobScript], {
+		detached: true,
+		stdio: ["ignore", logFd, logFd],
+	});
+	child.unref();
+	// (R-5) 부모의 logFd 즉시 close — 안 닫으면 job 수만큼 fd 영구 점유.
+	closeSync(logFd);
+
+	writeFileSync(join(jobDir, "jobpid"), String(child.pid));
+	writeFileSync(join(jobDir, "pid"), String(child.pid)); // 하위 호환 — 신 형식: pid = job bash PID
+
+	return { jobId, jobPid: child.pid, logPath };
 }
 
 // ---------------------------------------------------------------------------
@@ -306,10 +373,18 @@ function tryBackground(sessionId: string, arg?: string): { ok: boolean; message:
 // ---------------------------------------------------------------------------
 let bgCommandsRegistered = false;
 
-/** "남아있는 bg 프로세스": 래퍼가 빠지고(wrapperAlive=false) 작업이 살아있는 상태 */
+/**
+ * "남아있는 bg 프로세스":
+ *  - 구 형식: 래퍼가 빠지고(wrapperAlive=false) 작업이 살아있는 상태
+ *  - 신 형식(Phase 1): pid 파일이 job bash 자체이므로 wrapperPid === jobpid (살아있음)
+ */
 function hasBackgroundedJob(sessionId: string): boolean {
 	return scanJobs().some(
-		(j) => j.sessionId === sessionId && j.backgrounded && j.status === "running" && !j.wrapperAlive,
+		(j) =>
+			j.sessionId === sessionId &&
+			j.backgrounded &&
+			j.status === "running" &&
+			(!j.wrapperAlive || j.wrapperPid === j.jobPid),
 	);
 }
 
@@ -342,7 +417,7 @@ function registerBgCommands(pi: ExtensionAPI, ui?: AutocompleteUi): void {
 				const icon = j.status === "running" ? "⏳" : j.status === "done" ? (j.exitCode === 0 ? "✓" : "✗") : "💀";
 				const started = new Date(j.started).toLocaleTimeString("ko-KR", { hour12: false });
 				const exit = j.status === "done" ? ` exit=${j.exitCode}` : "";
-				const bg = !j.wrapperAlive && j.status === "running" ? " [bg]" : "";
+				const bg = j.status === "running" && (!j.wrapperAlive || j.wrapperPid === j.jobPid) ? " [bg]" : "";
 				return `${icon} ${j.id}  ${started}  ${j.status}${exit}${bg}  ${cmdSummary(j.cmd, 60)}\n    log: ${j.logPath}`;
 			});
 			ctx.ui.notify(lines.join("\n"), "info");
@@ -536,9 +611,63 @@ function startWatcher(pi: ExtensionAPI, sessionId: string): void {
 // 툴 콜 래핑
 // ---------------------------------------------------------------------------
 export default function (pi: ExtensionAPI) {
+	// -----------------------------------------------------------------------
+	// /bgrun <cmd> — Phase 1 사용자 경로 (redesign §7).
+	// job을 만드는 진입점이므로 무조건 등록 (조건부 등록은 /bg·/bglist·/bgkill에만).
+	// Phase 2에서 /bg로 승격 예정.
+	// -----------------------------------------------------------------------
+	pi.registerCommand("bgrun", {
+		description: "Run a command in background (usage: /bgrun <command>)",
+		handler: async (args, ctx) => {
+			const raw = (args ?? "").trim();
+			if (!raw) {
+				ctx.ui.notify("사용법: /bgrun <command>  (예: /bgrun npm install)", "warning");
+				return;
+			}
+			const quiet = raw.includes(QUIET_MARKER);
+			const cmd = (quiet ? raw.split(QUIET_MARKER).join("") : raw).trim();
+			if (!cmd) {
+				ctx.ui.notify("명령이 비어 있습니다", "warning");
+				return;
+			}
+			const { jobId, jobPid, logPath } = spawnBackground({
+				cmd,
+				sessionId: ctx.sessionManager.getSessionId(),
+				quiet,
+			});
+			registerBgCommands(pi, ctx.ui);
+			ctx.ui.notify(
+				`[bg] 백그라운드 시작\n` +
+				`  job: ${jobId}\n` +
+				`  pid: ${jobPid}\n` +
+				`  log: ${logPath}\n` +
+				`완료 시 자동으로 보고됩니다. /bglist로 상태 확인.`,
+				"info",
+			);
+		},
+	});
+
 	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
 		const cmd = event.input.command;
+
+		// (Phase 1, G8) `# bg:run` 마커 — 에이전트용 opt-in. 모델은 슬래시 커맨드를
+		// 실행할 수 없으므로 bash 명령 내 마커로 백그라운딩. 래핑 없이 직접 spawn,
+		// 툴 콜은 즉시 반환 → 완료 시 기존 자동 주입으로 결과 통지 (폐루프).
+		if (cmd.includes(BG_RUN_MARKER)) {
+			const quiet = cmd.includes(QUIET_MARKER);
+			const cleaned = cmd.split(BG_RUN_MARKER).join("").split(QUIET_MARKER).join("").trim();
+			if (!cleaned) return;
+			const { jobId } = spawnBackground({
+				cmd: cleaned,
+				sessionId: ctx.sessionManager.getSessionId(),
+				quiet,
+			});
+			// (v2.1-A) "started in" — 실행 전 백그라운딩이므로 mid-execution 전환("moved to")과 구분
+			event.input.command = `echo "[bg] started in background job=${jobId} (완료 시 자동 통지됩니다)"`;
+			return;
+		}
+
 		if (cmd.includes(BG_OFF_MARKER)) {
 			event.input.command = cmd.split(BG_OFF_MARKER).join("");
 			return;
