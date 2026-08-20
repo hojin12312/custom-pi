@@ -1,6 +1,6 @@
 # 🛠 bg.ts Architectural Redesign — Implementation Plan
 
-> **Status**: Draft v2 (리뷰 반영) · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST) · **Revised**: 2026-08-19 (KST) — 코드 대조 리뷰 반영, 변경 이력 §15
+> **Status**: Draft v2.1 (사소한 이슈 3개 패치) · **Author**: custom-pi maintainers · **Created**: 2026-08-19 (KST) · **Revised**: 2026-08-19 (KST) — 코드 대조 리뷰 반영 + 사소한 이슈 3개 패치(v2.1-A/B/C), 변경 이력 §15
 > **Scope**: `extensions/bg.ts` 전면 redesign (wrapper 스크립트 + `/bg` 커맨드 + `ctrl+q` 정책)
 > **관련 이슈**: tail 고아 누적, 파이프 오염, `pkill` 자기 재귀, 무조건 래핑 오버헤드
 
@@ -105,6 +105,7 @@
 └─────────────────────────────────────────────────────────────┘
         ↓
    fs.watch(BG_DIR) → 완료 감지 → pi.sendMessage(auto-inject)
+   (macOS: fs.watch 즉시 / Linux: 5s polling sweep — v2.1-C)
 ```
 
 **에이전트 경로 (리뷰 추가, G8)** — 모델은 슬래시 커맨드를 칠 수 없으므로 bash 명령 내 마커로 opt-in:
@@ -240,7 +241,9 @@ pi.registerCommand("bg", {
 재작성하고, 나머지는 **통과(래핑 없음 — G4 유지)** 한다.
 
 ```typescript
+// (v2.1-B: QUIET_MARKER 정의 스니펫에 추가 — 아래 핸들러가 참조함)
 const BG_RUN_MARKER = "# bg:run";
+const QUIET_MARKER = "# bg:quiet";
 
 pi.on("tool_call", (event, ctx) => {
     if (event.toolName !== "bash" || typeof event.input.command !== "string") return;
@@ -255,7 +258,9 @@ pi.on("tool_call", (event, ctx) => {
         quiet,
     });
     // 툴 콜은 즉시 "백그라운딩 완료"로 끝남 — 실제 작업은 detached bash가 수행
-    event.input.command = `echo "[bg] moved to background job=${jobId} (완료 시 자동 통지됩니다)"`;
+    // (v2.1-A: "moved to" → "started in" — `# bg:run`은 실행 전 백그라운딩이므로
+    //  mid-execution 전환(ctrl+q)과 구분)
+    event.input.command = `echo "[bg] started in background job=${jobId} (완료 시 자동 통지됩니다)"`;
 });
 ```
 
@@ -708,3 +713,13 @@ test("# bg:quiet suppresses notification", async () => {
 | **R-9** | §5.4 | SIGKILL 에스컬레이션 `setTimeout().unref()` | `pi -p`(원샷)에서 kill 호출 시 타이머만으로 프로세스가 2s 더 생존 — G7 회귀. (호스트가 먼저 종료하면 에스컬레이션 미수행은 허용, 문서화) |
 | **R-10** | §4 | 완료 감지의 Linux 폴링 전용 명시 | dc79e5e: Linux/Node 22에서 `FSWatcher.unref()` 무효 → Linux는 `fs.watch` 미사용. 다이어그램의 `fs.watch`만 보고 구현하면 G7 회귀 |
 | **R-11** | §5.9, §7 | settings.json `bg.useOptIn` → `PI_BG_OPT_IN` env var | extension은 현재 env var(`PI_BG_*`)만 읽고 settings 읽기 메커니즘이 없음 — 기존 패턴 통일, 미기재 의존 제거 |
+
+### 15.1 v2.1 패치 — 2026-08-19 사소한 이슈 3개
+
+v2 리뷰에서 발견된 비-결정적 이슈 3건. 각 항목은 **문서 일관성/명료성** 개선이며 설계 변경 없음.
+
+| ID | 위치 | 수정 내용 | 수정 이유 |
+|---|---|---|---|
+| **v2.1-A** | §5.1, §15 | `# bg:run` tool_call 핸들러의 echo 메시지 `"[bg] moved to background ..."` → `"[bg] started in background ..."` | `# bg:run`은 **실행 전** 백그라운딩(opt-in 마커)이고, "moved to"는 mid-execution 전환(구 ctrl+q)의 표현 — 의미 혼동 방지 |
+| **v2.1-B** | §5.1 | tool_call 스니펫에 `const QUIET_MARKER = "# bg:quiet"` 정의 추가 | 스니펫이 `cmd.includes(QUIET_MARKER)`를 참조하지만 정의 라인이 빠져 있었음 — 스니펫만 복사하면 컴파일 실패 |
+| **v2.1-C** | §4 | 완료 감지 다이어그램에 `(macOS: fs.watch 즉시 / Linux: 5s polling sweep)` 명시 | R-10 노트는 있었지만 다이어그램 자체에 플랫폼 분기 표시 없음 — 다이어그램만 보고 구현하면 G7 회귀 위험 |
