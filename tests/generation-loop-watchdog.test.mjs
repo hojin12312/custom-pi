@@ -19,6 +19,22 @@ test("detects the observed repeated sentence while it is streaming", async () =>
 	assert.ok(detection.blockTokens >= 8);
 });
 
+test("detects repetition when provider deltas split words", async () => {
+	const { GenerationLoopTracker } = await loadModule("split-deltas");
+	const tracker = new GenerationLoopTracker();
+	tracker.startMessage();
+	const chunks = ["LOOP", " WATCH", "DOG", " VALID", "ATION", " PH", "R", "ASE", ".", "\n"];
+	let detection;
+	for (let repetition = 0; repetition < 40 && !detection; repetition++) {
+		for (const chunk of chunks) {
+			detection = tracker.push("text_delta:0", chunk);
+			if (detection) break;
+		}
+	}
+	assert.ok(detection);
+	assert.equal(detection.repeats, 6);
+});
+
 test("does not flag varied long-form prose", async () => {
 	const { GenerationLoopTracker } = await loadModule();
 	const tracker = new GenerationLoopTracker();

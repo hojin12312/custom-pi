@@ -148,6 +148,12 @@ export class GenerationLoopTracker {
     if (state.raw.length < MIN_TOTAL_CHARS || state.charsSinceCheck < CHECK_EVERY_CHARS) return undefined;
     state.charsSinceCheck = 0;
     const tokens = tokenize(state.raw).slice(-MAX_WINDOW_TOKENS);
+    // Provider deltas may split a word at arbitrary byte/token boundaries
+    // (for example `WATCH` + `DOG`). A check that lands mid-word would make
+    // the incomplete suffix look unique and can repeatedly miss a genuinely
+    // periodic stream. Ignore only that unstable trailing token; it will be
+    // reconsidered after the next delta completes it.
+    if (/[\p{L}\p{N}_]$/u.test(state.raw)) tokens.pop();
     const detection = repeatedSuffix(tokens, channel);
     if (detection) this.triggered = true;
     return detection;
