@@ -2,7 +2,7 @@
 
 Custom extensions, core packages, and configuration templates for [Pi Coding Agent](https://github.com/earendil-works/pi).
 
-> 🕒 **Last Updated**: 2026-08-20 (KST)
+> 🕒 **Last Updated**: 2026-08-21 (KST)
 
 ---
 
@@ -65,6 +65,7 @@ Surgical local patches to Pi's own core dependency packages (not custom-pi exten
   * **Guardrail**: Appends a "never end mid-task" rule to the system prompt on every turn (`before_agent_start`).
   * **Observability**: `/wd-status` command + event log at `/tmp/pi-abnormal-stop-watchdog.log`.
 * 🔁 **`loop-guard.ts` (Exact Tool-Failure Loop Guard, 2026-08-20)** — prevents a deterministic agent loop before it consumes another full model turn. It records only hashes of the preceding assistant response, tool input, and tool error; when all three repeat for an `edit` or `write` call, it blocks the duplicate and tells the model to re-read the target or choose another strategy. A third identical attempt terminates that tool batch. Normal retries reset on a changed response/input, a successful mutation, or a new user prompt. `/loop-status` shows hash-only state. `bash` is deliberately excluded by default because transient shell failures may merit a retry; opt in with `PI_LOOP_GUARD_TOOLS=edit,write,bash`.
+* 🛑 **`generation-loop-watchdog.ts` (Streaming Generation Loop Watchdog, 2026-08-21)** — watches only assistant `text_delta`/`thinking_delta` events for a substantial exact token block repeated six times. It aborts the live request before a degenerate response consumes thousands of tokens, then waits for `agent_settled` and injects one different-strategy recovery prompt. If that recovery also loops, it stops and requires manual input instead of creating another loop. Tool-call argument deltas are excluded; diagnostics contain hashes/counts only. `/generation-loop-status` reports state. Set `PI_GENERATION_LOOP_GUARD=0` for an emergency disable; thresholds can be tuned with `PI_GENERATION_LOOP_{REPEATS,MIN_BLOCK_TOKENS,MAX_BLOCK_TOKENS}`.
 * 👁️ **`imageread.ts` (Local VLM Vision Bridge)**:
   * **Why it's needed**: High-performance coding models like DeepSeek V4 Flash or DeepSeek R1 are text-only models (`input: ["text"]`). `imageread` bridges this gap by allowing text models to inspect screenshots, charts, and image files via a local VLM endpoint.
   * **Dynamic Tool Activation**: Automatically activates when a text-only model is selected and hides itself when a native vision model (e.g. GPT-4o) is active.

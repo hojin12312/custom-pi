@@ -18,9 +18,9 @@ For an already-running `pi` session to pick up an installed change: try `/reload
 
 **Tests:**
 ```bash
-node --test tests/bg-redesign.test.mjs
+node --test tests/bg-redesign.test.mjs tests/loop-guard.test.mjs tests/generation-loop-watchdog.test.mjs
 ```
-Only test suite in the repo (covers `bg.ts`). Node's `--test` needs the explicit file path here — a bare directory (`node --test tests/`) does not glob correctly in the Node version used on Studio.
+Node's `--test` needs explicit file paths here — a bare directory (`node --test tests/`) does not glob correctly in the Node version used on Studio.
 
 **Quick syntax check on a single extension** (no local build/lint config exists; this is the ad hoc substitute):
 ```bash
@@ -45,7 +45,7 @@ Each file is a standalone default-exported `(pi: ExtensionAPI) => void` that wir
 
 A second, separate failure mode for the same kind of extension: the *injected follow-up turn itself* can error out as a completion request (`stopReason === "error"`) — e.g. it happens to land on a PICS replica that's mid-restart, and the in-flight stream dies. If the handler only checks the reply's text content for a verdict, an errored reply (no text) silently reads as "nothing to do" and the original task stays stalled indefinitely with no visible error (caught live 2026-08-20: a `systemctl restart llamacpp@TP2x0` killed an in-flight `auto_continue_compact.ts` decision-prompt request; the session sat idle for over an hour before anyone noticed). `auto_continue_compact.ts` now checks `stopReason` and retries/falls back to resuming anyway — copy that pattern in any handler that reads a follow-up turn's reply.
 
-Current extensions: `abnormal-stop-watchdog.ts` (detects a turn that ended `stop` with no tool calls and a stub response, gets an LLM judge verdict, auto-resumes), `auto_continue_compact.ts` (detects truncation right after context compaction, auto-resumes; retries/falls back to resuming if the decision-prompt turn itself errors), `bg.ts` (background bash runner — `/bg`, `# bg:run` marker, `/bglist`, `/bgkill`, completion auto-injection; see its own header comment for the full design, it's been through several redesign phases), `core_commands.ts` (`/exit`, `/clear`), `imageread.ts` (routes images through a local VLM backend for text-only models), `question.ts` (interactive choice UI), `todo.ts` (3-state todo tool), `web_search_content.ts` (raw-content web search via Exa MCP).
+Current extensions: `abnormal-stop-watchdog.ts` (detects a turn that ended `stop` with no tool calls and a stub response, gets an LLM judge verdict, auto-resumes), `generation-loop-watchdog.ts` (aborts substantial exact text/thinking repetition during streaming and resumes at most once from `agent_settled`), `loop-guard.ts` (blocks exact repeated deterministic edit/write failures), `auto_continue_compact.ts` (detects truncation right after context compaction, auto-resumes; retries/falls back to resuming if the decision-prompt turn itself errors), `bg.ts` (background bash runner — `/bg`, `# bg:run` marker, `/bglist`, `/bgkill`, completion auto-injection; see its own header comment for the full design, it's been through several redesign phases), `core_commands.ts` (`/exit`, `/clear`), `imageread.ts` (routes images through a local VLM backend for text-only models), `question.ts` (interactive choice UI), `todo.ts` (3-state todo tool), `web_search_content.ts` (raw-content web search via Exa MCP).
 
 ### `patches/` — patches to *installed* dependencies, not to this repo's code
 Surgical patches applied directly to files inside `node_modules/@earendil-works/pi-agent-core/...` (and, per the pi-subagents entry in `README.md`, a separate patch to `node_modules/pi-subagents/...`) on each machine. These exist because the bug is in Pi's own core loop, not something an extension hook can intercept. Each patch is pinned to an exact upstream package version; a version bump silently overwrites the patched file, so it must be reapplied (reapply/rollback commands and root-cause writeups live in the matching `docs/*.md`, e.g. `docs/PI-STREAM-IDLE-TIMEOUT-PATCH.md`).
