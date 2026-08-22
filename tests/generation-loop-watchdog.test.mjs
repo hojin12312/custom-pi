@@ -7,6 +7,7 @@ async function loadModule(tag = "unit") {
 }
 
 const repeated = "Let me look at the web patch logs, the web patch process, and the configuration. ";
+const lowDiversityRepeated = "`content` — ";
 
 test("detects the observed repeated sentence while it is streaming", async () => {
 	const { GenerationLoopTracker } = await loadModule();
@@ -15,6 +16,7 @@ test("detects the observed repeated sentence while it is streaming", async () =>
 	let detection;
 	for (let i = 0; i < 10 && !detection; i++) detection = tracker.push("thinking_delta:0", repeated);
 	assert.ok(detection);
+	assert.equal(detection.mode, "substantial");
 	assert.equal(detection.repeats, 6);
 	assert.ok(detection.blockTokens >= 8);
 });
@@ -32,7 +34,38 @@ test("detects repetition when provider deltas split words", async () => {
 		}
 	}
 	assert.ok(detection);
+	assert.equal(detection.mode, "substantial");
 	assert.equal(detection.repeats, 6);
+});
+
+for (const channel of ["thinking_delta:0", "text_delta:0"]) {
+	test(`detects the observed low-diversity loop in ${channel}`, async () => {
+		const { GenerationLoopTracker } = await loadModule(`low-diversity-${channel}`);
+		const tracker = new GenerationLoopTracker();
+		tracker.startMessage();
+		const chunks = ["`con", "tent", "` — "];
+		let detection;
+		let streamedChars = 0;
+		for (let repetition = 0; repetition < 100 && !detection; repetition++) {
+			for (const chunk of chunks) {
+				streamedChars += chunk.length;
+				detection = tracker.push(channel, chunk);
+				if (detection) break;
+			}
+		}
+		assert.ok(detection);
+		assert.equal(detection.mode, "low-diversity");
+		assert.equal(detection.repeats, 12);
+		assert.ok(streamedChars >= 256);
+		assert.ok(streamedChars < 512);
+	});
+}
+
+test("does not flag low-diversity text before the 256-character floor", async () => {
+	const { GenerationLoopTracker } = await loadModule("low-diversity-floor");
+	const tracker = new GenerationLoopTracker();
+	tracker.startMessage();
+	assert.equal(tracker.push("thinking_delta:0", lowDiversityRepeated.repeat(20)), undefined);
 });
 
 test("does not flag varied long-form prose", async () => {
@@ -57,6 +90,47 @@ test("ignores short separators and keeps channels independent", async () => {
 			undefined,
 		);
 	}
+});
+
+test("does not flag varied tables and lists", async () => {
+	const { GenerationLoopTracker } = await loadModule("varied-structured-output");
+	const tracker = new GenerationLoopTracker();
+	tracker.startMessage();
+	for (let i = 0; i < 80; i++) {
+		assert.equal(
+			tracker.push("text_delta:0", `| row-${i} | value-${i * 13} |\n- item-${i}: result-${i * 17}\n`),
+			undefined,
+		);
+	}
+});
+
+test("low-diversity integration aborts and uses the existing single recovery cap", async () => {
+	const { default: register } = await loadModule("low-diversity-integration");
+	const handlers = new Map();
+	const sent = [];
+	const pi = {
+		on(name, handler) { handlers.set(name, handler); },
+		registerCommand() {},
+		sendUserMessage(message) { sent.push(message); },
+	};
+	register(pi);
+	let aborts = 0;
+	const ctx = { hasUI: false, ui: { notify() {} }, abort() { aborts++; } };
+	const start = { message: { role: "assistant", content: [] } };
+
+	await handlers.get("input")({ source: "interactive" }, ctx);
+	for (const type of ["thinking_delta", "text_delta"]) {
+		await handlers.get("message_start")(start, ctx);
+		for (let i = 0; i < 50 && aborts < (type === "thinking_delta" ? 1 : 2); i++) {
+			await handlers.get("message_update")({
+				assistantMessageEvent: { type, contentIndex: 0, delta: lowDiversityRepeated },
+			}, ctx);
+		}
+		await handlers.get("agent_settled")({}, ctx);
+	}
+
+	assert.equal(aborts, 2);
+	assert.equal(sent.length, 1);
 });
 
 test("integration aborts promptly and auto-recovers only once", async () => {

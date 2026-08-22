@@ -20,6 +20,9 @@ const MAX_RECOVERIES = integerEnv("PI_GENERATION_LOOP_MAX_RECOVERIES", 1, 0, 1);
 const MIN_TOTAL_CHARS = 256;
 const MIN_BLOCK_CHARS = 32;
 const MIN_DISTINCT_WORDS = 4;
+const LOW_DIVERSITY_REPEAT_COUNT = 12;
+const LOW_DIVERSITY_MIN_REPEATED_CHARS = 256;
+const LOW_DIVERSITY_MAX_BLOCK_TOKENS = 32;
 const CHECK_EVERY_CHARS = 48;
 const MAX_WINDOW_CHARS = 16 * 1024;
 const MAX_WINDOW_TOKENS = 1024;
@@ -30,6 +33,7 @@ type ChannelState = {
 };
 
 export type LoopDetection = {
+  mode: "substantial" | "low-diversity";
   channel: string;
   blockTokens: number;
   blockChars: number;
@@ -92,10 +96,47 @@ function repeatedSuffix(tokens: string[], channel: string): LoopDetection | unde
 
     const normalized = block.join(" ");
     return {
+      mode: "substantial",
       channel,
       blockTokens: blockSize,
       blockChars: normalized.length,
       repeats: REPEAT_COUNT,
+      signature: hash(normalized),
+    };
+  }
+  return undefined;
+}
+
+function repeatedLowDiversitySuffix(tokens: string[], channel: string): LoopDetection | undefined {
+  const available = Math.min(LOW_DIVERSITY_MAX_BLOCK_TOKENS, Math.floor(tokens.length / LOW_DIVERSITY_REPEAT_COUNT));
+  for (let blockSize = 1; blockSize <= available; blockSize++) {
+    const blockStart = tokens.length - blockSize;
+    const block = tokens.slice(blockStart);
+    const lexicalTokens = block.filter((token) => /[\p{L}\p{N}_]/u.test(token));
+    if (!lexicalTokens.some((token) => token.length >= 2)) continue;
+
+    const normalized = block.join(" ");
+    if (normalized.length * LOW_DIVERSITY_REPEAT_COUNT < LOW_DIVERSITY_MIN_REPEATED_CHARS) continue;
+
+    let matches = true;
+    for (let repetition = 2; repetition <= LOW_DIVERSITY_REPEAT_COUNT; repetition++) {
+      const start = tokens.length - blockSize * repetition;
+      for (let offset = 0; offset < blockSize; offset++) {
+        if (tokens[start + offset] !== block[offset]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) break;
+    }
+    if (!matches) continue;
+
+    return {
+      mode: "low-diversity",
+      channel,
+      blockTokens: blockSize,
+      blockChars: normalized.length,
+      repeats: LOW_DIVERSITY_REPEAT_COUNT,
       signature: hash(normalized),
     };
   }
@@ -154,7 +195,7 @@ export class GenerationLoopTracker {
     // periodic stream. Ignore only that unstable trailing token; it will be
     // reconsidered after the next delta completes it.
     if (/[\p{L}\p{N}_]$/u.test(state.raw)) tokens.pop();
-    const detection = repeatedSuffix(tokens, channel);
+    const detection = repeatedSuffix(tokens, channel) ?? repeatedLowDiversitySuffix(tokens, channel);
     if (detection) this.triggered = true;
     return detection;
   }
@@ -171,7 +212,7 @@ export default function generationLoopWatchdog(pi: ExtensionAPI) {
 
   log(
     "info",
-    `loaded enabled=${ENABLED} repeats=${REPEAT_COUNT} blockTokens=${MIN_BLOCK_TOKENS}-${MAX_BLOCK_TOKENS} maxRecoveries=${MAX_RECOVERIES}`,
+    `loaded enabled=${ENABLED} repeats=${REPEAT_COUNT} blockTokens=${MIN_BLOCK_TOKENS}-${MAX_BLOCK_TOKENS} lowDiversityRepeats=${LOW_DIVERSITY_REPEAT_COUNT} lowDiversityMinChars=${LOW_DIVERSITY_MIN_REPEATED_CHARS} maxRecoveries=${MAX_RECOVERIES}`,
   );
 
   pi.on("input", (event) => {
@@ -204,7 +245,7 @@ export default function generationLoopWatchdog(pi: ExtensionAPI) {
     detections++;
     log(
       "warn",
-      `detected channel=${detection.channel} blockTokens=${detection.blockTokens} blockChars=${detection.blockChars} repeats=${detection.repeats} signature=${detection.signature}`,
+      `detected mode=${detection.mode} channel=${detection.channel} blockTokens=${detection.blockTokens} blockChars=${detection.blockChars} repeats=${detection.repeats} signature=${detection.signature}`,
     );
     if (ctx.hasUI) ctx.ui.notify("generation-loop: 반복 생성 감지 → 현재 응답 중단", "warning");
     ctx.abort();
@@ -253,7 +294,7 @@ export default function generationLoopWatchdog(pi: ExtensionAPI) {
     description: "Generation loop watchdog 상태 확인",
     handler: async (_args, ctx) => {
       const detail = lastDetection
-        ? `last=${lastDetection.signature} block=${lastDetection.blockTokens}x${lastDetection.repeats}`
+        ? `last=${lastDetection.signature} mode=${lastDetection.mode} block=${lastDetection.blockTokens}x${lastDetection.repeats}`
         : "last=none";
       const text = `generation-loop: enabled=${ENABLED} detections=${detections} recoveries=${recoveries}/${MAX_RECOVERIES} repeatedTurns=${repeatedTurns + (lastTurnFingerprint ? 1 : 0)} ${detail}`;
       if (ctx.hasUI) ctx.ui.notify(text, detections ? "warning" : "info");
